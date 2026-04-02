@@ -1,0 +1,21 @@
+services:
+  codex:
+    image: codex-workstation:latest
+    container_name: codex-dev
+    restart: unless-stopped
+    init: true
+    tty: true
+    stdin_open: true
+    working_dir: /workspace
+
+    # Explicit, but matches the default behavior of Codex anyway
+    environment:
+      CODEX_HOME: /root/.codex
+      CODEX_TMUX_SESSION: codex
+
+    volumes:
+      - ${PWD}:/workspace
+      - codex_state:/root/.codex
+
+volumes:
+  codex_state:
