@@ -1,7 +1,10 @@
 services:
   codex:
+    build:
+      context: .
+      dockerfile: Dockerfile
     image: codex-workstation:latest
-    container_name: codex-dev
+    container_name: ${CODEX_CONTAINER_NAME:-codex-dev}
     restart: unless-stopped
     init: true
     tty: true
@@ -11,10 +14,10 @@ services:
     # Explicit, but matches the default behavior of Codex anyway
     environment:
       CODEX_HOME: /root/.codex
-      CODEX_TMUX_SESSION: codex
+      CODEX_BYOBU_SESSION: codex
 
     volumes:
-      - ${PWD}:/workspace
+      - ${WORKSPACE_DIR:-./}:/workspace
       - codex_state:/root/.codex
 
 volumes:
