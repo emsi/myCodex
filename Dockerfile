@@ -58,6 +58,12 @@ RUN npm config set fund false \
 # Fail fast: prove Codex CLI is installed and runnable
 RUN command -v codex && codex --version
 
+# Default Codex runtime policy: no approvals and no sandboxing
+RUN tee /root/.codex/config.toml >/dev/null <<'EOF'
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+EOF
+
 # Entrypoint: create/keep a persistent Byobu(tmux) session for attach/detach
 RUN tee /usr/local/bin/byobu-entrypoint >/dev/null <<'EOF'
 #!/usr/bin/env bash
