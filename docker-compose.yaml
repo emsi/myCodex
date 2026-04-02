@@ -18,7 +18,7 @@ services:
 
     volumes:
       - ${WORKSPACE_DIR:-./}:/workspace
-      - codex_state:/root/.codex
+      - codex_state:/root/
 
 volumes:
   codex_state:
