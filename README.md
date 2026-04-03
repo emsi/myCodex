@@ -4,7 +4,7 @@ Reusable Docker setup for running Codex in a persistent tmux/byobu container.
 
 ## Files
 
-- `Dockerfile`: builds `codex-workstation:latest` on top of `ghcr.io/openai/codex-universal:latest`.
+- `Dockerfile`: builds `codex-workstation:latest` on top of `mcr.microsoft.com/devcontainers/base:ubuntu-24.04`, with Python/C/Rust toolchains and system-wide CLI installs under `/usr/local`.
 - `docker-compose.yaml`: defines service `codex`, build settings, workspace mount, and persistent Codex state.
 - `bin/start-codex-here.sh`: starts a stack for the current directory (from anywhere).
 - `bin/attach-codex.sh`: attaches to the `codex` tmux session for the current directory stack.

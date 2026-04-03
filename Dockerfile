@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-FROM ghcr.io/openai/codex-universal:latest
+FROM mcr.microsoft.com/devcontainers/base:ubuntu-24.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 
@@ -10,6 +10,11 @@ ARG INSTALL_OPENCODE=1
 
 SHELL ["/bin/bash", "-lc"]
 USER root
+
+# Install locations for global CLI binaries (system-wide, not /root)
+ENV NPM_CONFIG_PREFIX=/usr/local
+ENV CARGO_HOME=/usr/local/cargo
+ENV PATH=${CARGO_HOME}/bin:${PATH}
 
 # Full-fat dev/workstation tools + Byobu (tmux backend; DO NOT install screen)
 RUN apt-get update && apt-get install -y \
@@ -30,13 +35,19 @@ RUN apt-get update && apt-get install -y \
     locales \
     man-db manpages manpages-dev \
     bash-completion \
+    shellcheck \
     build-essential pkg-config cmake make gcc g++ \
     clang clang-format clang-tidy \
     ninja-build meson \
     autoconf automake libtool \
-    python3 python3-pip python3-venv \
+    nodejs npm \
+    python3 python3-dev python3-pip python3-venv python-is-python3 \
+    rustc cargo \
+    vim \
  && locale-gen en_US.UTF-8 \
- && update-locale LANG=en_US.UTF-8
+ && update-locale LANG=en_US.UTF-8 \
+ && mkdir -p "${CARGO_HOME}/bin" \
+ && rm -rf /var/lib/apt/lists/*
 
 # Debian/Ubuntu naming quirks
 RUN ln -sf "$(command -v fdfind)" /usr/local/bin/fd 2>/dev/null || true \
@@ -50,6 +61,7 @@ WORKDIR /workspace
 RUN npm config set fund false \
  && npm config set audit false \
  && npm config set update-notifier false \
+ && npm config set prefix "${NPM_CONFIG_PREFIX}" \
  && npm install -g @openai/codex \
  && if [[ "${INSTALL_CLAUDE_CODE}" == "1" ]]; then npm install -g @anthropic-ai/claude-code; fi \
  && if [[ "${INSTALL_GEMINI_CLI}" == "1" ]]; then npm install -g @google/gemini-cli; fi \
@@ -68,11 +80,6 @@ EOF
 RUN tee /usr/local/bin/byobu-entrypoint >/dev/null <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-
-# Keep codex-universal behavior (runtime selection etc.), if present
-if [[ -x /opt/codex/setup_universal.sh ]]; then
-  /opt/codex/setup_universal.sh || true
-fi
 
 SESSION="${CODEX_BYOBU_SESSION:-codex}"
 
