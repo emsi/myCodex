@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+COMPOSE_FILE="${PROJECT_ROOT}/docker-compose.yaml"
+SERVICE="${CODEX_SERVICE:-codex}"
+SESSION="${CODEX_BYOBU_SESSION:-codex}"
+WAIT_TIMEOUT_SECONDS="${MYCODEX_WAIT_TIMEOUT_SECONDS:-30}"
+
+CALLER_DIR="$(pwd -P)"
+RAW_NAME="$(basename -- "${CALLER_DIR}")"
+PROJECT_NAME="$(printf '%s' "${RAW_NAME}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9_-]+/-/g; s/^-+//; s/-+$//')"
+
+if [[ -z "${PROJECT_NAME}" ]]; then
+  PROJECT_NAME="workspace"
+fi
+
+CONTAINER_NAME="${PROJECT_NAME}-codex"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  myCodex                      Start stack if needed, then attach
+  myCodex attach               Attach to tmux session in codex service
+  myCodex ps [args...]         docker compose ps
+  myCodex start [args...]      docker compose start (defaults to codex)
+  myCodex stop [args...]       docker compose stop (defaults to codex)
+  myCodex restart [args...]    docker compose restart (defaults to codex)
+  myCodex exec <cmd...>        docker compose exec -it codex <cmd...>
+  myCodex <compose-cmd> ...    Pass through to docker compose
+EOF
+}
+
+compose_run() {
+  env \
+    WORKSPACE_DIR="${CALLER_DIR}" \
+    CODEX_CONTAINER_NAME="${CONTAINER_NAME}" \
+    docker compose -p "${PROJECT_NAME}" -f "${COMPOSE_FILE}" "$@"
+}
+
+compose() {
+  exec env \
+    WORKSPACE_DIR="${CALLER_DIR}" \
+    CODEX_CONTAINER_NAME="${CONTAINER_NAME}" \
+    docker compose -p "${PROJECT_NAME}" -f "${COMPOSE_FILE}" "$@"
+}
+
+is_running() {
+  compose_run ps --status running --services 2>/dev/null | grep -Fxq "${SERVICE}"
+}
+
+attach_tmux() {
+  compose exec -it "${SERVICE}" tmux attach -t "${SESSION}"
+}
+
+start_stack() {
+  compose_run up -d --build --wait --wait-timeout "${WAIT_TIMEOUT_SECONDS}"
+}
+
+if [[ $# -eq 0 ]]; then
+  if is_running; then
+    attach_tmux
+  fi
+
+  start_stack
+  attach_tmux
+fi
+
+subcommand="$1"
+shift || true
+
+case "${subcommand}" in
+  help|-h|--help)
+    usage
+    ;;
+  attach)
+    attach_tmux
+    ;;
+  ps)
+    compose ps "$@"
+    ;;
+  start)
+    if [[ $# -eq 0 ]]; then
+      compose start "${SERVICE}"
+    else
+      compose start "$@"
+    fi
+    ;;
+  stop)
+    if [[ $# -eq 0 ]]; then
+      compose stop "${SERVICE}"
+    else
+      compose stop "$@"
+    fi
+    ;;
+  restart)
+    if [[ $# -eq 0 ]]; then
+      compose restart "${SERVICE}"
+    else
+      compose restart "$@"
+    fi
+    ;;
+  exec)
+    if [[ $# -eq 0 ]]; then
+      echo "myCodex: exec requires a command" >&2
+      usage >&2
+      exit 2
+    fi
+    compose exec -it "${SERVICE}" "$@"
+    ;;
+  *)
+    compose "${subcommand}" "$@"
+    ;;
+esac

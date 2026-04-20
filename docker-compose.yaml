@@ -16,6 +16,13 @@ services:
       CODEX_HOME: /root/.codex
       CODEX_BYOBU_SESSION: codex
 
+    healthcheck:
+      test: ["CMD-SHELL", "byobu-tmux has-session -t \"$${CODEX_BYOBU_SESSION:-codex}\" >/dev/null 2>&1"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+      start_period: 1s
+
     volumes:
       - ${WORKSPACE_DIR:-./}:/workspace
       - codex_state:/root/

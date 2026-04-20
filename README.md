@@ -6,51 +6,52 @@ Reusable Docker setup for running Codex in a persistent tmux/byobu container.
 
 - `Dockerfile`: builds `codex-workstation:latest` on top of `mcr.microsoft.com/devcontainers/base:ubuntu-24.04`, with Python/C/Rust toolchains and system-wide CLI installs under `/usr/local`.
 - `docker-compose.yaml`: defines service `codex`, build settings, workspace mount, and persistent Codex state.
-- `bin/start-codex-here.sh`: starts a stack for the current directory (from anywhere).
-- `bin/attach-codex.sh`: attaches to the `codex` tmux session for the current directory stack.
+- `bin/myCodex`: unified launcher/manager for start, attach, and compose command forwarding.
+- `bin/start-codex-here.sh`: legacy startup helper (kept unchanged).
+- `bin/attach-codex.sh`: legacy attach helper (kept unchanged).
 
-## Default Usage (from this repo)
+## Primary Usage
 
-```bash
-cd ~/git/myCodex
-docker compose up -d --build
-docker compose exec -it codex tmux attach -t codex
-```
-
-In this mode:
-- Compose project name defaults to `mycodex`.
-- Container name defaults to `codex-dev`.
-- `/workspace` mounts this repository directory.
-
-## Usage From Another Project Directory
-
-From any working directory, start and attach using scripts from this repo:
+From any working directory:
 
 ```bash
 cd ~/git/misraTest
-~/git/myCodex/bin/start-codex-here.sh
-~/git/myCodex/bin/attach-codex.sh
+~/git/myCodex/bin/myCodex
 ```
 
-In this mode:
+Behavior:
 - Compose project name is derived from the current directory name (sanitized to lowercase).
 - Container name is `<project>-codex` (example: `misratest-codex`).
-- `/workspace` mounts the directory where you ran the script.
+- `/workspace` mounts the directory where you ran `myCodex`.
+- If the stack is already running for that directory, `myCodex` attaches directly.
+- If not running, `myCodex` runs `up -d --build --wait` and then attaches.
 
-## Stop / Remove a Stack
+Running from this repository directory works the same way and uses project name `mycodex`.
+
+## Management Commands
 
 ```bash
-docker compose -p <project-name> -f ~/git/myCodex/docker-compose.yaml down
+~/git/myCodex/bin/myCodex attach
+~/git/myCodex/bin/myCodex ps
+~/git/myCodex/bin/myCodex stop
+~/git/myCodex/bin/myCodex start
+~/git/myCodex/bin/myCodex restart
+~/git/myCodex/bin/myCodex exec bash
+~/git/myCodex/bin/myCodex logs -f codex
+~/git/myCodex/bin/myCodex down
 ```
 
-Examples:
-- `mycodex` for the default repo-local stack.
-- `misratest` when started from `~/git/misraTest`.
+- Built-in commands: `attach`, `ps`, `start`, `stop`, `restart`, `exec`.
+- `myCodex exec <cmd...>` maps to `docker compose exec -it codex <cmd...>`.
+- Unknown subcommands are passed through to `docker compose` with the correct project name, compose file, and workspace/container environment variables.
 
 ## Environment Notes
 
 - Compose supports overrides:
   - `WORKSPACE_DIR` for `/workspace` bind mount source.
   - `CODEX_CONTAINER_NAME` for explicit container name.
+- `CODEX_SERVICE` (default `codex`) controls service used for `attach` and `exec`.
+- `CODEX_BYOBU_SESSION` (default `codex`) controls tmux session used by `attach`.
+- `MYCODEX_WAIT_TIMEOUT_SECONDS` (default `30`) controls `up --wait` timeout for startup readiness.
 - Entrypoint ensures tmux session `codex` exists and keeps container alive for `docker compose exec`.
 - Optional interactive auto-attach: set `CODEX_AUTO_ATTACH=1` before interactive container start.
