@@ -3,11 +3,6 @@ FROM mcr.microsoft.com/devcontainers/base:ubuntu-24.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 
-# Optional agent CLIs (defaults ON)
-ARG INSTALL_CLAUDE_CODE=1
-ARG INSTALL_GEMINI_CLI=1
-ARG INSTALL_OPENCODE=1
-
 SHELL ["/bin/bash", "-lc"]
 USER root
 
@@ -57,15 +52,23 @@ RUN ln -sf "$(command -v fdfind)" /usr/local/bin/fd 2>/dev/null || true \
 RUN mkdir -p /workspace /root/.codex
 WORKDIR /workspace
 
-# Install Codex CLI (ALWAYS) + optional other CLIs
+# Configure npm global install behavior once.
 RUN npm config set fund false \
  && npm config set audit false \
  && npm config set update-notifier false \
- && npm config set prefix "${NPM_CONFIG_PREFIX}" \
- && npm install -g @openai/codex \
- && if [[ "${INSTALL_CLAUDE_CODE}" == "1" ]]; then npm install -g @anthropic-ai/claude-code; fi \
+ && npm config set prefix "${NPM_CONFIG_PREFIX}"
+
+# Optional agent CLIs (defaults ON). Declared late so base layers keep cache.
+ARG INSTALL_CLAUDE_CODE=1
+ARG INSTALL_GEMINI_CLI=1
+ARG INSTALL_OPENCODE=1
+RUN if [[ "${INSTALL_CLAUDE_CODE}" == "1" ]]; then npm install -g @anthropic-ai/claude-code; fi \
  && if [[ "${INSTALL_GEMINI_CLI}" == "1" ]]; then npm install -g @google/gemini-cli; fi \
  && if [[ "${INSTALL_OPENCODE}" == "1" ]]; then npm install -g opencode-ai; fi
+
+# Codex version is declared as late as possible to avoid invalidating base cache.
+ARG CODEX_VERSION=latest
+RUN npm install -g "@openai/codex@${CODEX_VERSION}"
 
 # Fail fast: prove Codex CLI is installed and runnable
 RUN command -v codex && codex --version

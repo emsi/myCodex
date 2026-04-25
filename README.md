@@ -7,6 +7,7 @@ Reusable Docker setup for running Codex in a persistent tmux/byobu container.
 - `Dockerfile`: builds `codex-workstation:latest` on top of `mcr.microsoft.com/devcontainers/base:ubuntu-24.04`, with Python/C/Rust toolchains and system-wide CLI installs under `/usr/local`.
 - `docker-compose.yaml`: defines service `codex`, build settings, workspace mount, and persistent Codex state.
 - `bin/myCodex`: unified launcher/manager for start, attach, and compose command forwarding.
+- `bin/build-codex-image.sh`: build-only helper for Codex image versions (no container start/restart).
 - `bin/start-codex-here.sh`: legacy startup helper (kept unchanged).
 - `bin/attach-codex.sh`: legacy attach helper (kept unchanged).
 
@@ -27,6 +28,32 @@ Behavior:
 - If not running, `myCodex` runs `up -d --build --wait` and then attaches.
 
 Running from this repository directory works the same way and uses project name `mycodex`.
+
+## Build Codex Image
+
+`Dockerfile` accepts `CODEX_VERSION` and installs `@openai/codex@${CODEX_VERSION}`.
+
+Build latest Codex from npm:
+
+```bash
+~/git/myCodex/bin/build-codex-image.sh
+```
+
+Build an explicit version:
+
+```bash
+~/git/myCodex/bin/build-codex-image.sh --version 0.30.1
+```
+
+Force rebuild even if local image tag already exists:
+
+```bash
+~/git/myCodex/bin/build-codex-image.sh --version 0.30.1 --force
+```
+
+Build output tags:
+- `codex-workstation:latest`
+- `codex-workstation:<codex-version>`
 
 ## Management Commands
 
