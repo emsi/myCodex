@@ -48,6 +48,20 @@ RUN apt-get update && apt-get install -y \
 RUN ln -sf "$(command -v fdfind)" /usr/local/bin/fd 2>/dev/null || true \
  && ln -sf "$(command -v batcat)" /usr/local/bin/bat 2>/dev/null || true
 
+# Install gh CLI
+RUN (type -p wget >/dev/null || (sudo apt update && sudo apt install wget -y)) \
+	&& sudo mkdir -p -m 755 /etc/apt/keyrings \
+	&& out=$(mktemp) && wget -nv -O$out https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+	&& cat $out | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null \
+	&& sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+	&& sudo mkdir -p -m 755 /etc/apt/sources.list.d \
+	&& echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+	&& sudo apt update \
+	&& sudo apt install gh -y \
+	&& rm -rf /var/lib/apt/lists/*
+
+RUN rm -rf /tmp/* /tmp/.[a-zA-Z0-9]*
+
 # Workspace + Codex state dir (persist /root/.codex via docker-compose volume)
 RUN mkdir -p /workspace /root/.codex
 WORKDIR /workspace
@@ -79,37 +93,17 @@ approval_policy = "never"
 sandbox_mode = "danger-full-access"
 EOF
 
-# Entrypoint: create/keep a persistent Byobu(tmux) session for attach/detach
-RUN tee /usr/local/bin/byobu-entrypoint >/dev/null <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-
-SESSION="${CODEX_BYOBU_SESSION:-codex}"
-
-# Prefer screen-like key bindings without interactive prompt
-if command -v byobu-ctrl-a >/dev/null; then
-  byobu-ctrl-a screen >/dev/null 2>&1 || true
-fi
-
-# Ensure a named tmux session exists, created via Byobu wrapper (not tmux directly)
-if ! byobu-tmux has-session -t "${SESSION}" 2>/dev/null; then
-  byobu-tmux new-session -d -s "${SESSION}" bash --login
-fi
-
-# If a command is provided, run it
-if [[ $# -gt 0 ]]; then
-  exec bash --login -c 'exec "$@"' bash "$@"
-fi
-
-# Optional interactive attach (disabled by default; enable with CODEX_AUTO_ATTACH=1)
-if [[ -t 0 && -t 1 && "${CODEX_AUTO_ATTACH:-0}" == "1" ]]; then
-  exec byobu -r "${SESSION}" 2>/dev/null || exec byobu -r
-fi
-
-# Keep container alive for later exec/attach
-exec sleep infinity
+# Claude YOLO mode:
+RUN mkdir /home/vscode/.claude && tee /home/vscode/.claude/settings.json >/dev/null <<'EOF'
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "defaultMode": "bypassPermissions",
+    "skipDangerousModePermissionPrompt": true
+  }
+}
 EOF
-RUN chmod +x /usr/local/bin/byobu-entrypoint
+RUN chown -R vscode:vscode /home/vscode/.claude/
 
 ENV LANG=en_US.UTF-8
 ENV LC_ALL=en_US.UTF-8
@@ -117,5 +111,6 @@ ENV EDITOR=vi
 ENV TERM=xterm-256color
 ENV CODEX_HOME=/root/.codex
 
-ENTRYPOINT ["/usr/local/bin/byobu-entrypoint"]
+COPY entrypoint.sh /usr/local/bin/
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD []

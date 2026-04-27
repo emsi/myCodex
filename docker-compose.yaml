@@ -5,7 +5,7 @@ services:
       dockerfile: Dockerfile
       args:
         CODEX_VERSION: ${CODEX_VERSION:-latest}
-    image: codex-workstation:latest
+    image: ghcr.io/infrasecture/harness-workstation
     container_name: ${CODEX_CONTAINER_NAME:-codex-dev}
     restart: unless-stopped
     init: true

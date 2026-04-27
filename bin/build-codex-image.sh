@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 COMPOSE_FILE="${PROJECT_ROOT}/docker-compose.yaml"
 SERVICE="${CODEX_SERVICE:-codex}"
-IMAGE_NAME="${MYCODEX_IMAGE_NAME:-codex-workstation}"
+IMAGE_NAME="${MYCODEX_IMAGE_NAME:-ghcr.io/infrasecture/harness-workstation}"
 
 usage() {
   cat <<'EOF'
@@ -16,8 +16,8 @@ Behavior:
   - Without --version, resolves latest version from npm (@openai/codex)
   - Builds docker compose service "codex" using CODEX_VERSION build arg
   - Tags resulting image as:
-      codex-workstation:latest
-      codex-workstation:<resolved-version>
+      ghcr.io/infrasecture/harness-workstation:latest
+      ghcr.io/infrasecture/harness-workstation:<resolved-version>
   - Does not start or restart containers
 EOF
 }
