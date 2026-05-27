@@ -36,6 +36,7 @@ compose_run() {
   env \
     WORKSPACE_DIR="${CALLER_DIR}" \
     CODEX_CONTAINER_NAME="${CONTAINER_NAME}" \
+    MYCODEX_ATTACH_HINT="${SCRIPT_DIR}/myCodex" \
     docker compose -p "${PROJECT_NAME}" -f "${COMPOSE_FILE}" "$@"
 }
 
@@ -43,6 +44,7 @@ compose() {
   exec env \
     WORKSPACE_DIR="${CALLER_DIR}" \
     CODEX_CONTAINER_NAME="${CONTAINER_NAME}" \
+    MYCODEX_ATTACH_HINT="${SCRIPT_DIR}/myCodex" \
     docker compose -p "${PROJECT_NAME}" -f "${COMPOSE_FILE}" "$@"
 }
 

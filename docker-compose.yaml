@@ -17,6 +17,7 @@ services:
     environment:
       CODEX_HOME: /root/.codex
       CODEX_BYOBU_SESSION: codex
+      MYCODEX_ATTACH_HINT: "${MYCODEX_ATTACH_HINT:-<path_to_myCodex>/myCodex}"
 
     healthcheck:
       test: ["CMD-SHELL", "byobu-tmux has-session -t \"$${CODEX_BYOBU_SESSION:-codex}\" >/dev/null 2>&1"]

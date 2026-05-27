@@ -10,7 +10,15 @@ fi
 
 # Ensure a named tmux session exists, created via Byobu wrapper (not tmux directly)
 if ! byobu-tmux has-session -t "${SESSION}" 2>/dev/null; then
-  byobu-tmux new-session -d -s "${SESSION}" bash --login
+  STARTUP_CMD="$(cat <<'EOF'
+clear
+cat /etc/mycodex/session-banner.txt
+echo
+echo "To attach back to the session run ${MYCODEX_ATTACH_HINT:-<path_to_myCodex>/myCodex} again in the same project dir."
+exec bash --login
+EOF
+)"
+  byobu-tmux new-session -d -s "${SESSION}" bash --login -lc "${STARTUP_CMD}"
 fi
 
 # If a command is provided, run it

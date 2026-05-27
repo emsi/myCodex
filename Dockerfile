@@ -91,6 +91,23 @@ RUN command -v codex && codex --version
 RUN tee /root/.codex/config.toml >/dev/null <<'EOF'
 approval_policy = "never"
 sandbox_mode = "danger-full-access"
+
+[projects."/workspace"]
+trust_level = "trusted"
+EOF
+
+# Session quickstart banner shown once when tmux session is created.
+RUN mkdir -p /etc/mycodex && tee /etc/mycodex/session-banner.txt >/dev/null <<'EOF'
+Codex container session is running.
+
+Run Codex:
+  codex
+
+Byobu/tmux quick keys:
+  New screen/window: Ctrl+a c
+  Switch screens: Ctrl+a n / Ctrl+a p
+  Switch by number: Ctrl+a 0,1,2... (numbering starts at 0)
+  Detach session: Ctrl+a d
 EOF
 
 # Claude YOLO mode:
