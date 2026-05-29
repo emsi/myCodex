@@ -21,31 +21,209 @@ CONTAINER_NAME="${PROJECT_NAME}-codex"
 usage() {
   cat <<'EOF'
 Usage:
-  myCodex                      Start stack if needed, then attach
-  myCodex attach               Attach to tmux session in codex service
-  myCodex ps [args...]         docker compose ps
-  myCodex start [args...]      docker compose start (defaults to codex)
-  myCodex stop [args...]       docker compose stop (defaults to codex)
-  myCodex restart [args...]    docker compose restart (defaults to codex)
-  myCodex exec <cmd...>        docker compose exec -it codex <cmd...>
-  myCodex <compose-cmd> ...    Pass through to docker compose
+  myCodex [options]                  Start stack if needed, then attach
+  myCodex [options] attach           Attach to tmux session in codex service
+  myCodex [options] ps [args...]     docker compose ps
+  myCodex [options] start [args...]  docker compose start (defaults to codex)
+  myCodex [options] stop [args...]   docker compose stop (defaults to codex)
+  myCodex [options] restart [args...] docker compose restart (defaults to codex)
+  myCodex [options] exec <cmd...>    docker compose exec -it codex <cmd...>
+  myCodex [options] <compose-cmd> ... Pass through to docker compose
+
+Options:
+  --private-env                      Use a per-project Codex state volume
+  -v, --volume <spec>                Add an extra Docker-style volume mount
 EOF
 }
 
+die() {
+  echo "myCodex: $*" >&2
+  exit 2
+}
+
+yaml_quote() {
+  local value="$1"
+  value="${value//\'/\'\'}"
+  printf "'%s'" "${value}"
+}
+
+normalize_mount_source() {
+  local source="$1"
+
+  case "${source}" in
+    \~)
+      printf '%s' "${HOME}"
+      ;;
+    \~/*)
+      printf '%s' "${HOME}/${source#\~/}"
+      ;;
+    .|..|./*|../*)
+      realpath -m -- "${CALLER_DIR}/${source}"
+      ;;
+    *)
+      printf '%s' "${source}"
+      ;;
+  esac
+}
+
+is_managed_mount_target() {
+  local target="$1"
+
+  while [[ "${target}" != "/" && "${target}" == */ ]]; do
+    target="${target%/}"
+  done
+
+  case "${target}" in
+    /workspace|/root|/root/.codex)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+EXTRA_VOLUME_SPECS=()
+PRIVATE_ENV=0
+RUNTIME_CONFIG_CHANGED=0
+EXTRA_VOLUME_OVERRIDE_FILE=""
+
+cleanup() {
+  if [[ -n "${EXTRA_VOLUME_OVERRIDE_FILE}" ]]; then
+    rm -f -- "${EXTRA_VOLUME_OVERRIDE_FILE}"
+  fi
+}
+trap cleanup EXIT
+
+add_extra_volume() {
+  local spec="$1"
+  local source target mode rest
+
+  case "${spec}" in
+    *$'\n'*|*$'\r'*)
+      die "volume spec must not contain newlines"
+      ;;
+  esac
+
+  IFS=':' read -r source target mode rest <<<"${spec}"
+
+  if [[ -z "${source}" || -z "${target}" || -n "${rest:-}" ]]; then
+    die "volume spec must use source:target[:mode] syntax: ${spec}"
+  fi
+
+  if [[ "${spec}" == *: ]]; then
+    die "volume spec mode must not be empty: ${spec}"
+  fi
+
+  if [[ "${target}" != /* ]]; then
+    die "volume target must be an absolute container path: ${spec}"
+  fi
+
+  if is_managed_mount_target "${target}"; then
+    die "volume target conflicts with a managed myCodex mount: ${target}"
+  fi
+
+  source="$(normalize_mount_source "${source}")"
+
+  if [[ -n "${mode:-}" ]]; then
+    EXTRA_VOLUME_SPECS+=("${source}:${target}:${mode}")
+  else
+    EXTRA_VOLUME_SPECS+=("${source}:${target}")
+  fi
+
+  RUNTIME_CONFIG_CHANGED=1
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --private-env)
+      PRIVATE_ENV=1
+      RUNTIME_CONFIG_CHANGED=1
+      shift
+      ;;
+    -v|--volume)
+      if [[ $# -lt 2 ]]; then
+        die "$1 requires a volume spec"
+      fi
+      add_extra_volume "$2"
+      shift 2
+      ;;
+    --volume=*)
+      add_extra_volume "${1#--volume=}"
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      break
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+STATE_VOLUME_NAME="codex_state"
+if [[ "${PRIVATE_ENV}" == "1" ]]; then
+  STATE_VOLUME_NAME="${PROJECT_NAME}_codex_state"
+fi
+
+ensure_extra_volumes_override() {
+  if [[ ${#EXTRA_VOLUME_SPECS[@]} -eq 0 || -n "${EXTRA_VOLUME_OVERRIDE_FILE}" ]]; then
+    return
+  fi
+
+  EXTRA_VOLUME_OVERRIDE_FILE="$(mktemp -t mycodex-volumes.XXXXXX.yaml)"
+  {
+    printf 'services:\n'
+    printf '  codex:\n'
+    printf '    volumes:\n'
+    local volume
+    for volume in "${EXTRA_VOLUME_SPECS[@]}"; do
+      printf '      - '
+      yaml_quote "${volume}"
+      printf '\n'
+    done
+  } >"${EXTRA_VOLUME_OVERRIDE_FILE}"
+}
+
+compose_args() {
+  printf '%s\n' -p "${PROJECT_NAME}" -f "${COMPOSE_FILE}"
+  if [[ -n "${EXTRA_VOLUME_OVERRIDE_FILE}" ]]; then
+    printf '%s\n' -f "${EXTRA_VOLUME_OVERRIDE_FILE}"
+  fi
+}
+
 compose_run() {
+  ensure_extra_volumes_override
+  local args=()
+  mapfile -t args < <(compose_args)
+
   env \
     WORKSPACE_DIR="${CALLER_DIR}" \
     CODEX_CONTAINER_NAME="${CONTAINER_NAME}" \
     MYCODEX_ATTACH_HINT="${SCRIPT_DIR}/myCodex" \
-    docker compose -p "${PROJECT_NAME}" -f "${COMPOSE_FILE}" "$@"
+    MYCODEX_STATE_VOLUME_NAME="${STATE_VOLUME_NAME}" \
+    docker compose "${args[@]}" "$@"
 }
 
 compose() {
-  exec env \
+  ensure_extra_volumes_override
+  local args=()
+  mapfile -t args < <(compose_args)
+
+  env \
     WORKSPACE_DIR="${CALLER_DIR}" \
     CODEX_CONTAINER_NAME="${CONTAINER_NAME}" \
     MYCODEX_ATTACH_HINT="${SCRIPT_DIR}/myCodex" \
-    docker compose -p "${PROJECT_NAME}" -f "${COMPOSE_FILE}" "$@"
+    MYCODEX_STATE_VOLUME_NAME="${STATE_VOLUME_NAME}" \
+    docker compose "${args[@]}" "$@"
 }
 
 is_running() {
@@ -57,11 +235,15 @@ attach_tmux() {
 }
 
 start_stack() {
+  if [[ ${#EXTRA_VOLUME_SPECS[@]} -gt 0 ]]; then
+    compose_run config >/dev/null
+  fi
+
   compose_run up -d --build --wait --wait-timeout "${WAIT_TIMEOUT_SECONDS}"
 }
 
 if [[ $# -eq 0 ]]; then
-  if is_running; then
+  if is_running && [[ "${RUNTIME_CONFIG_CHANGED}" != "1" ]]; then
     attach_tmux
   fi
 

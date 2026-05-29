@@ -32,3 +32,4 @@ services:
 
 volumes:
   codex_state:
+    name: ${MYCODEX_STATE_VOLUME_NAME:-codex_state}
