@@ -122,8 +122,8 @@ RUN mkdir /home/vscode/.claude && tee /home/vscode/.claude/settings.json >/dev/n
 EOF
 RUN chown -R vscode:vscode /home/vscode/.claude/
 
-# enable autocompletion for tmus sessions
-RUN sed -i '/^# enable bash completion in interactive shells$/,/^#fi$/ s/^#//' /etc/bash.bashrc
+# Enable autocompletion for tmux sessions.
+RUN sed -i '/^#if ! shopt -oq posix; then$/,/^#fi$/ s/^#//' /etc/bash.bashrc
 
 ENV LANG=en_US.UTF-8
 ENV LC_ALL=en_US.UTF-8
