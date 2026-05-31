@@ -26,7 +26,7 @@ Behavior:
 - `/workspace` mounts the directory where you ran `myCodex`.
 - Codex state under `/root/` uses shared Docker volume `codex_state` by default.
 - If the stack is already running for that directory, `myCodex` attaches directly.
-- If not running, `myCodex` runs `up -d --build --wait` and then attaches.
+- If not running, `myCodex` runs `up -d --wait` and then attaches. Build the image explicitly when you want updates.
 
 Running from this repository directory works the same way and uses project name `mycodex`.
 
