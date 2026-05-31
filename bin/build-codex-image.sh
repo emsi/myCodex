@@ -10,20 +10,25 @@ IMAGE_NAME="${MYCODEX_IMAGE_NAME:-ghcr.io/infrasecture/harness-workstation}"
 usage() {
   cat <<'EOF'
 Usage:
-  build-codex-image.sh [--version <semver>] [--force]
+  build-codex-image.sh [--version <semver>] [--refresh-tags|--force]
 
 Behavior:
   - Without --version, resolves latest version from npm (@openai/codex)
   - Builds docker compose service "codex" using CODEX_VERSION build arg
+  - Skips build when the local version tag already exists, unless --refresh-tags
+    or --force is used
+  - --refresh-tags/--force still uses the normal Docker build cache; it does not
+    pass --no-cache
   - Tags resulting image as:
       ghcr.io/infrasecture/harness-workstation:latest
       ghcr.io/infrasecture/harness-workstation:<resolved-version>
+  - Pushes both tags
   - Does not start or restart containers
 EOF
 }
 
 VERSION=""
-FORCE=0
+REFRESH_TAGS=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -36,8 +41,8 @@ while [[ $# -gt 0 ]]; do
       VERSION="$2"
       shift 2
       ;;
-    --force)
-      FORCE=1
+    --refresh-tags|--force)
+      REFRESH_TAGS=1
       shift
       ;;
     -h|--help)
@@ -61,8 +66,9 @@ if [[ -z "${VERSION}" ]]; then
   exit 1
 fi
 
-if [[ "${FORCE}" != "1" ]] && docker image inspect "${IMAGE_NAME}:${VERSION}" >/dev/null 2>&1; then
+if [[ "${REFRESH_TAGS}" != "1" ]] && docker image inspect "${IMAGE_NAME}:${VERSION}" >/dev/null 2>&1; then
   echo "Image already exists: ${IMAGE_NAME}:${VERSION}"
+  echo "Use --refresh-tags to rebuild with cache, refresh tags, and push."
   exit 0
 fi
 
@@ -70,6 +76,12 @@ echo "Building ${IMAGE_NAME} with CODEX_VERSION=${VERSION}"
 CODEX_VERSION="${VERSION}" docker compose -f "${COMPOSE_FILE}" build "${SERVICE}"
 
 docker image tag "${IMAGE_NAME}:latest" "${IMAGE_NAME}:${VERSION}"
+
+echo "Pushing ${IMAGE_NAME}:${VERSION}"
+docker image push "${IMAGE_NAME}:${VERSION}"
+
+echo "Pushing ${IMAGE_NAME}:latest"
+docker image push "${IMAGE_NAME}:latest"
 
 echo "Build complete:"
 echo "  ${IMAGE_NAME}:latest"

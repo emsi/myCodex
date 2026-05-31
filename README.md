@@ -156,13 +156,15 @@ Build a specific Codex version:
 ./bin/build-codex-image.sh --version 0.30.1
 ```
 
-Force a rebuild even when the local version tag already exists:
+Refresh tags after Dockerfile or build-context changes, while still using the
+normal Docker build cache:
 
 ```bash
-./bin/build-codex-image.sh --version 0.30.1 --force
+./bin/build-codex-image.sh --version 0.30.1 --refresh-tags
 ```
 
-The helper builds the `codex` Compose service and tags the image as:
+The helper builds the `codex` Compose service, tags the image, and pushes both
+tags:
 
 - `ghcr.io/infrasecture/harness-workstation:latest`
 - `ghcr.io/infrasecture/harness-workstation:<codex-version>`
