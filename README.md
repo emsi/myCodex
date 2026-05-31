@@ -4,7 +4,7 @@ Reusable Docker setup for running Codex in a persistent tmux/byobu container.
 
 ## Files
 
-- `Dockerfile`: builds `codex-workstation:latest` on top of `mcr.microsoft.com/devcontainers/base:ubuntu-24.04`, with Python/C/Rust toolchains and system-wide CLI installs under `/usr/local`.
+- `Dockerfile`: builds `ghcr.io/infrasecture/harness-workstation:latest` on top of `mcr.microsoft.com/devcontainers/base:ubuntu-24.04`, with Python/C/Rust toolchains and system-wide CLI installs under `/usr/local`.
 - `docker-compose.yaml`: defines service `codex`, build settings, workspace mount, and persistent Codex state.
 - `bin/myCodex`: unified launcher/manager for start, attach, and compose command forwarding.
 - `bin/build-codex-image.sh`: build-only helper for Codex image versions (no container start/restart).
@@ -67,8 +67,8 @@ Force rebuild even if local image tag already exists:
 ```
 
 Build output tags:
-- `codex-workstation:latest`
-- `codex-workstation:<codex-version>`
+- `ghcr.io/infrasecture/harness-workstation:latest`
+- `ghcr.io/infrasecture/harness-workstation:<codex-version>`
 
 ## Management Commands
 
