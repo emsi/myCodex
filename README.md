@@ -1,105 +1,228 @@
-# myCodex Docker Workstation
+# myCodex
 
-Reusable Docker setup for running Codex in a persistent tmux/byobu container.
+myCodex is a Docker-based harness for running coding agents in a persistent
+Linux workstation container. It is designed for high-autonomy agent workflows
+where the agent is expected to inspect, edit, build, and test code with minimal
+operator friction.
 
-## Files
+The container is intentionally configured for "yolo" mode. Codex runs without
+approval prompts and without sandbox restrictions inside the container, and
+Claude Code is configured to bypass permission prompts. Treat any mounted
+directory as fully available to the agent.
 
-- `Dockerfile`: builds `ghcr.io/infrasecture/harness-workstation:latest` on top of `mcr.microsoft.com/devcontainers/base:ubuntu-24.04`, with Python/C/Rust toolchains and system-wide CLI installs under `/usr/local`.
-- `docker-compose.yaml`: defines service `codex`, build settings, workspace mount, and persistent Codex state.
-- `bin/myCodex`: unified launcher/manager for start, attach, and compose command forwarding.
-- `bin/build-codex-image.sh`: build-only helper for Codex image versions (no container start/restart).
-- `bin/start-codex-here.sh`: legacy startup helper (kept unchanged).
-- `bin/attach-codex.sh`: legacy attach helper (kept unchanged).
+## What It Provides
 
-## Primary Usage
+- A reusable Ubuntu workstation image for coding agents.
+- Codex CLI installed from npm, with optional version-pinned image builds.
+- Optional Claude Code, Gemini CLI, and OpenCode installs.
+- A persistent Byobu/tmux session for attach/detach workflows.
+- A Compose launcher that mounts the current project at `/workspace`.
+- Shared or per-project persistent state under `/root/`.
+- Support for extra bind mounts using Docker `-v` syntax.
+- Common development tools: Git, Git LFS, GitHub CLI, ripgrep, fd, jq, yq, fzf,
+  build toolchains, Python, Node.js, Rust, ShellCheck, and debugging/networking
+  utilities.
 
-From any working directory:
+## Safety Model
 
-```bash
-cd ~/git/misraTest
-~/git/myCodex/bin/myCodex
-```
+This project prioritizes agent autonomy over isolation.
 
-Behavior:
-- Compose project name is derived from the current directory name (sanitized to lowercase).
-- Container name is `<project>-codex` (example: `misratest-codex`).
-- `/workspace` mounts the directory where you ran `myCodex`.
-- Codex state under `/root/` uses shared Docker volume `codex_state` by default.
-- If the stack is already running for that directory, `myCodex` attaches directly.
-- If not running, `myCodex` runs `up -d --wait` and then attaches. Build the image explicitly when you want updates.
+- Codex config:
+  - `approval_policy = "never"`
+  - `sandbox_mode = "danger-full-access"`
+  - `/workspace` is marked trusted
+- Claude Code config:
+  - `defaultMode = "bypassPermissions"`
+  - dangerous-mode prompts are skipped
+- The project directory is mounted read-write at `/workspace`.
+- Persistent state is mounted at `/root/`.
+- Extra mounts can expose host files, credentials, caches, or tools.
 
-Running from this repository directory works the same way and uses project name `mycodex`.
+Use private state volumes and minimal mounts when working with sensitive code.
+Do not mount host credentials unless the agent genuinely needs them.
 
-Use a project-specific Codex state volume instead of shared state:
+## Requirements
 
-```bash
-~/git/myCodex/bin/myCodex --private-env
-```
+- Docker
+- Docker Compose v2
+- Bash
 
-Add extra mounts with Docker `-v` short syntax:
+## Quick Start
 
-```bash
-~/git/myCodex/bin/myCodex -v ~/.ssh:/root/.ssh:ro
-~/git/myCodex/bin/myCodex --volume ./cache:/mnt/cache
-~/git/myCodex/bin/myCodex --private-env -v ./data:/mnt/data:ro
-```
-
-## Build Codex Image
-
-`Dockerfile` accepts `CODEX_VERSION` and installs `@openai/codex@${CODEX_VERSION}`.
-
-Build latest Codex from npm:
-
-```bash
-~/git/myCodex/bin/build-codex-image.sh
-```
-
-Build an explicit version:
+Clone the repository:
 
 ```bash
-~/git/myCodex/bin/build-codex-image.sh --version 0.30.1
+git clone https://github.com/<owner>/<repo>.git myCodex
+cd myCodex
 ```
 
-Force rebuild even if local image tag already exists:
+Build the image:
 
 ```bash
-~/git/myCodex/bin/build-codex-image.sh --version 0.30.1 --force
+./bin/build-codex-image.sh
 ```
 
-Build output tags:
+Start a workstation for the current directory:
+
+```bash
+./bin/myCodex
+```
+
+For day-to-day use from other repositories, install or symlink `bin/myCodex`
+onto your `PATH`, then run it from the project you want to work on:
+
+```bash
+cd project
+myCodex
+```
+
+The launcher starts the container if needed, waits for the tmux session to be
+ready, and attaches to it.
+
+## Usage
+
+Start or attach to the agent workstation for the current directory:
+
+```bash
+myCodex
+```
+
+Use an isolated state volume for the current project:
+
+```bash
+myCodex --private-env
+```
+
+Mount additional directories:
+
+```bash
+myCodex -v ./cache:/mnt/cache
+myCodex --volume ./data:/mnt/data:ro
+myCodex --private-env -v ./tools:/mnt/tools:ro
+```
+
+Run management commands:
+
+```bash
+myCodex attach
+myCodex ps
+myCodex stop
+myCodex start
+myCodex restart
+myCodex exec bash
+myCodex logs -f codex
+myCodex down
+```
+
+Unknown subcommands are passed through to `docker compose` with the correct
+project name, Compose file, workspace mount, and container environment.
+
+## Launcher Behavior
+
+`bin/myCodex` is a thin wrapper around Docker Compose.
+
+When invoked from a project directory, it:
+
+- derives a Compose project name from the current directory name;
+- names the container `<project>-codex`;
+- mounts the current directory as `/workspace`;
+- mounts persistent state at `/root/`;
+- starts the `codex` service with `docker compose up -d --wait`;
+- attaches to the configured tmux session.
+
+The default state volume is shared across projects:
+
+```text
+codex_state
+```
+
+With `--private-env`, the state volume is project-specific:
+
+```text
+<project>_codex_state
+```
+
+## Image Builds
+
+Build the latest Codex version published on npm:
+
+```bash
+./bin/build-codex-image.sh
+```
+
+Build a specific Codex version:
+
+```bash
+./bin/build-codex-image.sh --version 0.30.1
+```
+
+Force a rebuild even when the local version tag already exists:
+
+```bash
+./bin/build-codex-image.sh --version 0.30.1 --force
+```
+
+The helper builds the `codex` Compose service and tags the image as:
+
 - `ghcr.io/infrasecture/harness-workstation:latest`
 - `ghcr.io/infrasecture/harness-workstation:<codex-version>`
 
-## Management Commands
+## Configuration
 
-```bash
-~/git/myCodex/bin/myCodex --private-env
-~/git/myCodex/bin/myCodex -v ./cache:/mnt/cache
-~/git/myCodex/bin/myCodex attach
-~/git/myCodex/bin/myCodex ps
-~/git/myCodex/bin/myCodex stop
-~/git/myCodex/bin/myCodex start
-~/git/myCodex/bin/myCodex restart
-~/git/myCodex/bin/myCodex exec bash
-~/git/myCodex/bin/myCodex logs -f codex
-~/git/myCodex/bin/myCodex down
+Environment variables:
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `CODEX_SERVICE` | `codex` | Compose service used for `attach` and `exec`. |
+| `CODEX_BYOBU_SESSION` | `codex` | tmux session name inside the container. |
+| `CODEX_CONTAINER_NAME` | `codex-dev` | Explicit container name when running Compose directly. |
+| `CODEX_VERSION` | `latest` | Codex npm version used during image build. |
+| `CODEX_AUTO_ATTACH` | `0` | Attach automatically during interactive container startup. |
+| `MYCODEX_WAIT_TIMEOUT_SECONDS` | `30` | Startup readiness timeout for `docker compose up --wait`. |
+| `MYCODEX_STATE_VOLUME_NAME` | `codex_state` | Docker volume mounted at `/root/`. |
+| `MYCODEX_IMAGE_NAME` | `ghcr.io/infrasecture/harness-workstation` | Image name used by the build helper. |
+| `WORKSPACE_DIR` | `./` | Host path mounted at `/workspace` when running Compose directly. |
+
+Build arguments:
+
+| Argument | Default | Description |
+| --- | --- | --- |
+| `CODEX_VERSION` | `latest` | Version of `@openai/codex` to install. |
+| `INSTALL_CLAUDE_CODE` | `1` | Install Claude Code. |
+| `INSTALL_GEMINI_CLI` | `1` | Install Gemini CLI. |
+| `INSTALL_OPENCODE` | `1` | Install OpenCode. |
+
+## Repository Layout
+
+```text
+.
+├── Dockerfile
+├── docker-compose.yaml
+├── entrypoint.sh
+└── bin
+    ├── myCodex
+    ├── build-codex-image.sh
+    ├── start-codex-here.sh
+    └── attach-codex.sh
 ```
 
-- Built-in commands: `attach`, `ps`, `start`, `stop`, `restart`, `exec`.
-- `myCodex exec <cmd...>` maps to `docker compose exec -it codex <cmd...>`.
-- Unknown subcommands are passed through to `docker compose` with the correct project name, compose file, and workspace/container environment variables.
-- Launcher options must come before the subcommand: `--private-env`, `-v <spec>`, `--volume <spec>`, `--volume=<spec>`.
-- `--volume` accepts Docker short `-v` syntax (`source:target[:mode]`), not Docker `--mount type=...` syntax.
+- `Dockerfile` builds the agent workstation image.
+- `docker-compose.yaml` defines the `codex` service, workspace mount, health
+  check, and persistent state volume.
+- `entrypoint.sh` creates the persistent Byobu/tmux session and keeps the
+  container alive.
+- `bin/myCodex` is the primary launcher and Compose wrapper.
+- `bin/build-codex-image.sh` builds and tags the workstation image.
+- `bin/start-codex-here.sh` and `bin/attach-codex.sh` are legacy helpers.
 
-## Environment Notes
+## Publishing Checklist
 
-- Compose supports overrides:
-  - `WORKSPACE_DIR` for `/workspace` bind mount source.
-  - `CODEX_CONTAINER_NAME` for explicit container name.
-  - `MYCODEX_STATE_VOLUME_NAME` for explicit `/root/` state volume name.
-- `CODEX_SERVICE` (default `codex`) controls service used for `attach` and `exec`.
-- `CODEX_BYOBU_SESSION` (default `codex`) controls tmux session used by `attach`.
-- `MYCODEX_WAIT_TIMEOUT_SECONDS` (default `30`) controls `up --wait` timeout for startup readiness.
-- `--private-env` sets the state volume to `<project>_codex_state`; default state volume is shared as `codex_state`.
-- Entrypoint ensures tmux session `codex` exists and keeps container alive for `docker compose exec`.
-- Optional interactive auto-attach: set `CODEX_AUTO_ATTACH=1` before interactive container start.
+Before publishing changes:
+
+- Review `git status --short`.
+- Keep private project names, local paths, credentials, and generated agent
+  output out of commits.
+- Do not commit Docker volumes, shell history, financial exports, API keys, or
+  local test artifacts.
+- Prefer examples that use `myCodex` or repo-relative commands such as
+  `./bin/myCodex`.
