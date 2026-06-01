@@ -242,13 +242,17 @@ start_stack() {
   compose_run up -d --wait --wait-timeout "${WAIT_TIMEOUT_SECONDS}"
 }
 
-if [[ $# -eq 0 ]]; then
-  if is_running && [[ "${RUNTIME_CONFIG_CHANGED}" != "1" ]]; then
-    attach_tmux
+run_default() {
+  if ! is_running || [[ "${RUNTIME_CONFIG_CHANGED}" == "1" ]]; then
+    start_stack
   fi
 
-  start_stack
   attach_tmux
+}
+
+if [[ $# -eq 0 ]]; then
+  run_default
+  exit $?
 fi
 
 subcommand="$1"
