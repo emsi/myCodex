@@ -33,6 +33,7 @@ Usage:
 Options:
   --private-env                      Use a per-project Codex state volume
   -v, --volume <spec>                Add an extra Docker-style volume mount
+  -f, --compose-file <path>          Add an extra Compose override file
 EOF
 }
 
@@ -66,6 +67,22 @@ normalize_mount_source() {
   esac
 }
 
+normalize_compose_file() {
+  local file="$1"
+
+  case "${file}" in
+    *$'\n'*|*$'\r'*)
+      die "compose file path must not contain newlines"
+      ;;
+    /*)
+      printf '%s' "${file}"
+      ;;
+    *)
+      realpath -m -- "${CALLER_DIR}/${file}"
+      ;;
+  esac
+}
+
 is_managed_mount_target() {
   local target="$1"
 
@@ -84,6 +101,7 @@ is_managed_mount_target() {
 }
 
 EXTRA_VOLUME_SPECS=()
+ADDITIONAL_COMPOSE_FILES=()
 PRIVATE_ENV=0
 RUNTIME_CONFIG_CHANGED=0
 EXTRA_VOLUME_OVERRIDE_FILE=""
@@ -134,6 +152,19 @@ add_extra_volume() {
   RUNTIME_CONFIG_CHANGED=1
 }
 
+add_compose_file() {
+  local file
+
+  file="$(normalize_compose_file "$1")"
+
+  if [[ ! -f "${file}" ]]; then
+    die "compose override file does not exist: ${file}"
+  fi
+
+  ADDITIONAL_COMPOSE_FILES+=("${file}")
+  RUNTIME_CONFIG_CHANGED=1
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --private-env)
@@ -150,6 +181,17 @@ while [[ $# -gt 0 ]]; do
       ;;
     --volume=*)
       add_extra_volume "${1#--volume=}"
+      shift
+      ;;
+    -f|--compose-file)
+      if [[ $# -lt 2 ]]; then
+        die "$1 requires a compose file path"
+      fi
+      add_compose_file "$2"
+      shift 2
+      ;;
+    --compose-file=*)
+      add_compose_file "${1#--compose-file=}"
       shift
       ;;
     -h|--help)
@@ -201,6 +243,10 @@ ensure_extra_volumes_override() {
 
 compose_args() {
   printf '%s\n' -p "${PROJECT_NAME}" -f "${COMPOSE_FILE}"
+  local file
+  for file in "${ADDITIONAL_COMPOSE_FILES[@]}"; do
+    printf '%s\n' -f "${file}"
+  done
   if [[ -n "${EXTRA_VOLUME_OVERRIDE_FILE}" ]]; then
     printf '%s\n' -f "${EXTRA_VOLUME_OVERRIDE_FILE}"
   fi

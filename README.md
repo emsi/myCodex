@@ -101,6 +101,23 @@ myCodex --volume ./data:/mnt/data:ro
 myCodex --private-env -v ./tools:/mnt/tools:ro
 ```
 
+Apply an additional Compose file after the built-in myCodex Compose file:
+
+```bash
+myCodex -f mycodex.compose.yaml
+myCodex --compose-file mycodex.ports.yaml
+```
+
+For example, expose ports from the agent container:
+
+```yaml
+services:
+  codex:
+    ports:
+      - "3000:3000"
+      - "8080:8080"
+```
+
 Run management commands:
 
 ```bash
@@ -127,6 +144,8 @@ When invoked from a project directory, it:
 - names the container `<project>-codex`;
 - mounts the current directory as `/workspace`;
 - mounts persistent state at `/root/`;
+- appends any `-f` / `--compose-file` override files after the built-in Compose
+  file;
 - starts the `codex` service with `docker compose up -d --wait`;
 - attaches to the configured tmux session.
 
