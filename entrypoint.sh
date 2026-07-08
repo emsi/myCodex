@@ -339,7 +339,10 @@ if ! as_runtime_user byobu-tmux has-session -t "${SESSION}" 2>/dev/null; then
 cd "${MYCODEX_WORKDIR}"
 clear
 cat /etc/mycodex/session-banner.txt
-exec bash --login
+if [[ -f "${HOME}/.bashrc" ]]; then
+  exec bash --login
+fi
+exec bash --rcfile /home/vscode/.bashrc -i
 EOF
 )"
   as_runtime_user byobu-tmux new-session -d -s "${SESSION}" -c "${RUNTIME_WORKDIR}" bash --login -lc "${STARTUP_CMD}"
