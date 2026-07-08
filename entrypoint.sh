@@ -138,14 +138,35 @@ ensure_passwordless_sudo() {
   chmod 0440 /etc/sudoers.d/mycodex-runtime-user
 }
 
-own_home_volume() {
+home_is_empty() {
+  local home="$1"
+
+  [[ -z "$(find "${home}" -xdev -mindepth 1 -maxdepth 1 -print -quit)" ]]
+}
+
+bootstrap_empty_home_volume() {
   local home="$1"
   local uid="$2"
   local gid="$3"
+  local state_dir="${home}/.mycodex"
+  local state_file="${state_dir}/home-bootstrap.env"
 
   mkdir -p "${home}"
+
+  if ! home_is_empty "${home}"; then
+    return
+  fi
+
   chown "${uid}:${gid}" "${home}"
-  find "${home}" -xdev -exec chown -h "${uid}:${gid}" {} +
+  mkdir -p "${state_dir}"
+  chown "${uid}:${gid}" "${state_dir}"
+
+  cat >"${state_file}" <<EOF
+schema=1
+uid=${uid}
+gid=${gid}
+EOF
+  chown "${uid}:${gid}" "${state_file}"
 }
 
 toml_escape() {
@@ -160,6 +181,7 @@ initialize_codex_config() {
   local escaped_workdir
 
   mkdir -p "${CODEX_HOME}"
+  chown "${RUNTIME_UID}:${RUNTIME_GID}" "${CODEX_HOME}"
   if [[ -e "${config_file}" ]]; then
     return
   fi
@@ -172,6 +194,7 @@ sandbox_mode = "danger-full-access"
 [projects."${escaped_workdir}"]
 trust_level = "trusted"
 EOF
+  chown "${RUNTIME_UID}:${RUNTIME_GID}" "${config_file}"
 }
 
 initialize_claude_config() {
@@ -179,6 +202,7 @@ initialize_claude_config() {
   local settings_file="${claude_dir}/settings.json"
 
   mkdir -p "${claude_dir}"
+  chown "${RUNTIME_UID}:${RUNTIME_GID}" "${claude_dir}"
   if [[ -e "${settings_file}" ]]; then
     return
   fi
@@ -192,6 +216,7 @@ initialize_claude_config() {
   }
 }
 EOF
+  chown "${RUNTIME_UID}:${RUNTIME_GID}" "${settings_file}"
 }
 
 as_runtime_user() {
@@ -224,10 +249,9 @@ ensure_supplementary_groups "${RUNTIME_USER}" "${HOST_GROUP_SPECS}"
 ensure_passwordless_sudo "${RUNTIME_USER}"
 
 mkdir -p "${RUNTIME_WORKDIR}"
-own_home_volume "${RUNTIME_HOME}" "${RUNTIME_UID}" "${RUNTIME_GID}"
+bootstrap_empty_home_volume "${RUNTIME_HOME}" "${RUNTIME_UID}" "${RUNTIME_GID}"
 initialize_codex_config
 initialize_claude_config
-chown -R "${RUNTIME_UID}:${RUNTIME_GID}" "${CODEX_HOME}" "${RUNTIME_HOME}/.claude"
 
 if [[ "${RUNTIME_WORKDIR}" != "/workspace" ]]; then
   if rmdir /workspace 2>/dev/null; then

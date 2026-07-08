@@ -14,11 +14,11 @@ keeping container paths aligned with host paths for easier interoperability.
 - The workspace bind mount should appear at the same absolute path inside the
   container as it has on the host, and that path should be the workdir.
 - Codex and Claude permissive defaults should be initialized in the persistent
-  user home on first run, not baked into the Docker image.
+  user home on first run.
 - The container should start as root, perform setup, then run the long-lived
   session as the host user.
 - The runtime user should have a passwd/group entry and passwordless sudo.
-- Work must happen on a feature branch and should not be pushed.
+- Work must happen on a feature branch.
 
 ## Proposed Architecture
 
@@ -55,20 +55,18 @@ runtime user, because tmux sockets and agent state will live under that user.
   path. This preserves state while allowing the path inside the container to
   match the host user's home.
 - Keep the container root at startup rather than using Compose `user:`. Root is
-  needed to create users/groups, chown the named volume, and write sudoers.
+  needed to create users/groups, initialize an empty home volume, create config
+  files, and write sudoers.
 - Initialize Codex/Claude config in the entrypoint, guarded by `[[ ! -e file ]]`,
-  so user changes persist and are not overwritten by image rebuilds.
-- Prefer local Docker image tag resolution from the previous change; this feature
-  should not introduce implicit pulls or remote version checks.
-- Keep `/workspace` available as a compatibility symlink where practical, but do
-  not make it the canonical workdir.
+  preserving user changes across image rebuilds.
+- Continue using local Docker image tag resolution from the previous change.
+- Make the same absolute host path the canonical workdir. Keep `/workspace`
+  available as a compatibility symlink where practical.
 - Use `gosu` for the entrypoint privilege drop. This gives the runtime process
   normal passwd/group-based supplementary groups after root has finished setup.
 - Use local Docker tag resolution from `myCodex` unchanged. Host-user runtime
   setup is independent from image update policy.
-- Avoid reading the host `CODEX_HOME` environment variable in Compose
-  interpolation. `myCodex` passes `MYCODEX_CODEX_HOME` explicitly so host agent
-  config paths do not accidentally leak into the container.
+- Pass `MYCODEX_CODEX_HOME` explicitly from `myCodex` for Compose interpolation.
 
 ## Current Implementation Summary
 
@@ -76,13 +74,13 @@ runtime user, because tmux sockets and agent state will live under that user.
   and the persistent home mount target.
 - `bin/myCodex` passes host UID/GID, username/group, supplementary group specs,
   host home, same-path workdir, and Codex home to Compose.
-- `entrypoint.sh` creates groups and users, writes passwordless sudoers, chowns
-  the mounted home volume without crossing into nested bind mounts, initializes
-  Codex and Claude config files if missing, and starts byobu/tmux as the runtime
-  user.
+- `entrypoint.sh` creates groups and users, writes passwordless sudoers, owns
+  the mounted home directory only when that mounted home is empty, owns the
+  small Codex/Claude bootstrap paths it creates, initializes Codex and Claude
+  config files if missing, and starts byobu/tmux as the runtime user.
 - Existing image users/groups with matching UID/GID are renamed to the host
-  username/group name when there is no name conflict. If there is a name
-  conflict, numeric identity remains authoritative.
+  username/group name when the requested names are available. Numeric identity
+  remains authoritative.
 
 ## Validation Notes
 
@@ -115,7 +113,11 @@ runtime user, because tmux sockets and agent state will live under that user.
   - passwordless sudo works
   - tmux pane path is `/tmp/mycodex-compose-test`
   - the private test stack and volume were removed after validation
-
-## Deviations
-
-- None yet.
+- Empty persistent-home volume test verified:
+  - home directory becomes `1000:1000`
+  - `.mycodex/home-bootstrap.env` becomes `1000:1000`
+  - Codex and Claude config files are created
+- Non-empty persistent-home volume test verified:
+  - home directory remains usable as `1000:1000`
+  - pre-existing root-owned sentinel remains `0:0`
+  - Codex and Claude config files are created
