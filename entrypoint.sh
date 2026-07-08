@@ -307,6 +307,14 @@ exec_as_runtime_user() {
       "$@"
 }
 
+RUNTIME_SHELL_CMD="$(cat <<'EOF'
+if [[ -f "${HOME}/.bashrc" ]]; then
+  exec bash --login
+fi
+exec bash --rcfile /home/vscode/.bashrc -i
+EOF
+)"
+
 startup_status "configuring runtime user"
 PRIMARY_GROUP="$(group_name_for_gid "${RUNTIME_GID}" "${REQUESTED_GROUP}")"
 RUNTIME_USER="$(ensure_runtime_user "${RUNTIME_UID}" "${RUNTIME_GID}" "${REQUESTED_USER}" "${PRIMARY_GROUP}" "${RUNTIME_HOME}")"
@@ -335,18 +343,17 @@ as_runtime_user byobu-ctrl-a screen >/dev/null 2>&1 || true
 # Ensure a named tmux session exists, created via Byobu wrapper.
 if ! as_runtime_user byobu-tmux has-session -t "${SESSION}" 2>/dev/null; then
   startup_status "creating tmux session"
-  STARTUP_CMD="$(cat <<'EOF'
+STARTUP_CMD="$(cat <<'EOF'
 cd "${MYCODEX_WORKDIR}"
 clear
 cat /etc/mycodex/session-banner.txt
-if [[ -f "${HOME}/.bashrc" ]]; then
-  exec bash --login
-fi
-exec bash --rcfile /home/vscode/.bashrc -i
 EOF
 )"
+  STARTUP_CMD="${STARTUP_CMD}"$'\n'"${RUNTIME_SHELL_CMD}"
   as_runtime_user byobu-tmux new-session -d -s "${SESSION}" -c "${RUNTIME_WORKDIR}" bash --login -lc "${STARTUP_CMD}"
 fi
+as_runtime_user byobu-tmux set-option -t "${SESSION}" default-shell /bin/bash >/dev/null
+as_runtime_user byobu-tmux set-option -t "${SESSION}" default-command "${RUNTIME_SHELL_CMD}" >/dev/null
 
 if [[ $# -gt 0 ]]; then
   startup_status "running command"
