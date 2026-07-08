@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_PATH="$(realpath -- "${BASH_SOURCE[0]}")"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${SCRIPT_PATH}")" && pwd)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+# shellcheck source=bin/lib/mycodex-image.sh
 source "${SCRIPT_DIR}/lib/mycodex-image.sh"
 
 COMPOSE_FILE="${PROJECT_ROOT}/docker-compose.yaml"
@@ -12,8 +13,14 @@ SESSION="${CODEX_BYOBU_SESSION:-codex}"
 WAIT_TIMEOUT_SECONDS="${MYCODEX_WAIT_TIMEOUT_SECONDS:-30}"
 IMAGE_NAME="${MYCODEX_IMAGE_NAME:-${MYCODEX_DEFAULT_IMAGE_NAME}}"
 IMAGE_TAG="${MYCODEX_IMAGE_TAG:-}"
+HOST_UID="$(id -u)"
+HOST_GID="$(id -g)"
+HOST_USER="$(id -un)"
+HOST_GROUP="$(id -gn)"
+CONTAINER_HOME="${MYCODEX_CONTAINER_HOME:-${HOME:-/home/${HOST_USER}}}"
 
 CALLER_DIR="$(pwd -P)"
+CONTAINER_WORKDIR="${MYCODEX_WORKDIR:-${CALLER_DIR}}"
 RAW_NAME="$(basename -- "${CALLER_DIR}")"
 PROJECT_NAME="$(printf '%s' "${RAW_NAME}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9_-]+/-/g; s/^-+//; s/-+$//')"
 
@@ -51,6 +58,26 @@ yaml_quote() {
   local value="$1"
   value="${value//\'/\'\'}"
   printf "'%s'" "${value}"
+}
+
+host_group_specs() {
+  local gids names
+  local -a gid_list name_list specs
+  local i name
+
+  gids="$(id -G)"
+  names="$(id -Gn)"
+  read -r -a gid_list <<<"${gids}"
+  read -r -a name_list <<<"${names}"
+
+  specs=()
+  for i in "${!gid_list[@]}"; do
+    name="${name_list[$i]:-group-${gid_list[$i]}}"
+    specs+=("${gid_list[$i]}:${name}")
+  done
+
+  local IFS=,
+  printf '%s\n' "${specs[*]}"
 }
 
 normalize_mount_source() {
@@ -96,7 +123,7 @@ is_managed_mount_target() {
   done
 
   case "${target}" in
-    /workspace|/root|/root/.codex)
+    "${CONTAINER_WORKDIR}"|"${CONTAINER_HOME}"|/workspace|/root|/root/.codex)
       return 0
       ;;
     *)
@@ -110,6 +137,7 @@ ADDITIONAL_COMPOSE_FILES=()
 PRIVATE_ENV=0
 RUNTIME_CONFIG_CHANGED=0
 EXTRA_VOLUME_OVERRIDE_FILE=""
+HOST_GROUPS="$(host_group_specs)"
 
 cleanup() {
   if [[ -n "${EXTRA_VOLUME_OVERRIDE_FILE}" ]]; then
@@ -319,6 +347,14 @@ compose_run() {
     MYCODEX_STATE_VOLUME_NAME="${STATE_VOLUME_NAME}" \
     MYCODEX_IMAGE_NAME="${IMAGE_NAME}" \
     MYCODEX_IMAGE_TAG="${IMAGE_TAG:-latest}" \
+    MYCODEX_HOST_UID="${HOST_UID}" \
+    MYCODEX_HOST_GID="${HOST_GID}" \
+    MYCODEX_HOST_USER="${HOST_USER}" \
+    MYCODEX_HOST_GROUP="${HOST_GROUP}" \
+    MYCODEX_HOST_GROUPS="${HOST_GROUPS}" \
+    MYCODEX_CONTAINER_HOME="${CONTAINER_HOME}" \
+    MYCODEX_WORKDIR="${CONTAINER_WORKDIR}" \
+    MYCODEX_CODEX_HOME="${CONTAINER_HOME}/.codex" \
     docker compose "${args[@]}" "$@"
 }
 
@@ -348,6 +384,14 @@ compose() {
     MYCODEX_STATE_VOLUME_NAME="${STATE_VOLUME_NAME}" \
     MYCODEX_IMAGE_NAME="${IMAGE_NAME}" \
     MYCODEX_IMAGE_TAG="${IMAGE_TAG:-latest}" \
+    MYCODEX_HOST_UID="${HOST_UID}" \
+    MYCODEX_HOST_GID="${HOST_GID}" \
+    MYCODEX_HOST_USER="${HOST_USER}" \
+    MYCODEX_HOST_GROUP="${HOST_GROUP}" \
+    MYCODEX_HOST_GROUPS="${HOST_GROUPS}" \
+    MYCODEX_CONTAINER_HOME="${CONTAINER_HOME}" \
+    MYCODEX_WORKDIR="${CONTAINER_WORKDIR}" \
+    MYCODEX_CODEX_HOME="${CONTAINER_HOME}/.codex" \
     docker compose "${args[@]}" "$@"
 }
 
@@ -356,7 +400,13 @@ is_running() {
 }
 
 attach_tmux() {
-  compose exec -it "${SERVICE}" tmux attach -t "${SESSION}"
+  compose exec -it "${SERVICE}" sudo -u "${HOST_USER}" -- \
+    env \
+      HOME="${CONTAINER_HOME}" \
+      USER="${HOST_USER}" \
+      LOGNAME="${HOST_USER}" \
+      CODEX_HOME="${CONTAINER_HOME}/.codex" \
+      tmux attach -t "${SESSION}"
 }
 
 start_stack() {
@@ -420,7 +470,15 @@ case "${subcommand}" in
       usage >&2
       exit 2
     fi
-    compose exec -it "${SERVICE}" "$@"
+    # shellcheck disable=SC2016 # Expanded by the target user's login shell.
+    compose exec -it "${SERVICE}" sudo -u "${HOST_USER}" -- \
+      env \
+        HOME="${CONTAINER_HOME}" \
+        USER="${HOST_USER}" \
+        LOGNAME="${HOST_USER}" \
+        CODEX_HOME="${CONTAINER_HOME}/.codex" \
+        MYCODEX_WORKDIR="${CONTAINER_WORKDIR}" \
+        bash --login -c 'cd "${MYCODEX_WORKDIR}"; exec "$@"' bash "$@"
     ;;
   up|create)
     if has_arg --build "$@" || has_arg --no-build "$@"; then

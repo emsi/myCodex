@@ -142,8 +142,11 @@ When invoked from a project directory, it:
 
 - derives a Compose project name from the current directory name;
 - names the container `<project>-codex`;
-- mounts the current directory as `/workspace`;
-- mounts persistent state at `/root/`;
+- mounts the current directory at the same absolute path inside the container;
+- uses that same path as the container workdir;
+- mounts persistent state as the runtime user's home directory;
+- creates a runtime user matching the host UID/GID and supplementary groups;
+- initializes Codex and Claude defaults in that persistent home on first run;
 - appends any `-f` / `--compose-file` override files after the built-in Compose
   file;
 - starts the `codex` service with `docker compose up -d --no-build --wait`;
@@ -208,11 +211,13 @@ Environment variables:
 | `CODEX_VERSION` | `latest` | Codex npm version used during image build. |
 | `CODEX_AUTO_ATTACH` | `0` | Attach automatically during interactive container startup. |
 | `MYCODEX_WAIT_TIMEOUT_SECONDS` | `30` | Startup readiness timeout for `docker compose up --wait`. |
-| `MYCODEX_STATE_VOLUME_NAME` | `codex_state` | Docker volume mounted at `/root/`. |
+| `MYCODEX_STATE_VOLUME_NAME` | `codex_state` | Docker volume mounted as the runtime user's home. |
 | `MYCODEX_IMAGE_NAME` | `ghcr.io/infrasecture/harness-workstation` | Image name used by build and runtime helpers. |
 | `MYCODEX_IMAGE_TAG` | latest local semver | Runtime image tag. Set to `latest` to opt into mutable-tag behavior. |
 | `MYCODEX_CODEX_NPM_PACKAGE` | `@openai/codex` | npm package used for fallback latest-version discovery. |
-| `WORKSPACE_DIR` | `./` | Host path mounted at `/workspace` when running Compose directly. |
+| `MYCODEX_CONTAINER_HOME` | host `$HOME` via `myCodex`, `/home/codex` direct | Runtime home path mounted from the persistent state volume. |
+| `MYCODEX_WORKDIR` | current directory via `myCodex`, `/workspace` direct | Container workdir and workspace bind target. |
+| `WORKSPACE_DIR` | `./` | Host path mounted at `MYCODEX_WORKDIR` when running Compose directly. |
 
 Build arguments:
 

@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_PATH="$(realpath -- "${BASH_SOURCE[0]}")"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${SCRIPT_PATH}")" && pwd)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+# shellcheck source=bin/lib/mycodex-image.sh
 source "${SCRIPT_DIR}/lib/mycodex-image.sh"
 
 COMPOSE_FILE="${PROJECT_ROOT}/docker-compose.yaml"
