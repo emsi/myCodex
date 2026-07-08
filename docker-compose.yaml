@@ -26,7 +26,7 @@ services:
       MYCODEX_ATTACH_HINT: "${MYCODEX_ATTACH_HINT:-<path_to_myCodex>/myCodex}"
 
     healthcheck:
-      test: ["CMD-SHELL", "sudo -Hiu \"$${MYCODEX_HOST_USER:-codex}\" env CODEX_HOME=\"$${CODEX_HOME:-/home/codex/.codex}\" byobu-tmux has-session -t \"$${CODEX_BYOBU_SESSION:-codex}\" >/dev/null 2>&1"]
+      test: ["CMD-SHELL", "gosu \"$${MYCODEX_HOST_USER:-codex}\" env CODEX_HOME=\"$${CODEX_HOME:-/home/codex/.codex}\" byobu-tmux has-session -t \"$${CODEX_BYOBU_SESSION:-codex}\" >/dev/null 2>&1"]
       interval: 1s
       timeout: 3s
       retries: 30

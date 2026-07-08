@@ -400,7 +400,7 @@ is_running() {
 }
 
 attach_tmux() {
-  compose exec -it "${SERVICE}" sudo -u "${HOST_USER}" -- \
+  compose exec -it "${SERVICE}" gosu "${HOST_USER}" \
     env \
       HOME="${CONTAINER_HOME}" \
       USER="${HOST_USER}" \
@@ -471,7 +471,7 @@ case "${subcommand}" in
       exit 2
     fi
     # shellcheck disable=SC2016 # Expanded by the target user's login shell.
-    compose exec -it "${SERVICE}" sudo -u "${HOST_USER}" -- \
+    compose exec -it "${SERVICE}" gosu "${HOST_USER}" \
       env \
         HOME="${CONTAINER_HOME}" \
         USER="${HOST_USER}" \
