@@ -146,8 +146,16 @@ When invoked from a project directory, it:
 - mounts persistent state at `/root/`;
 - appends any `-f` / `--compose-file` override files after the built-in Compose
   file;
-- starts the `codex` service with `docker compose up -d --wait`;
+- starts the `codex` service with `docker compose up -d --no-build --wait`;
+- resolves the runtime image to a local immutable semver tag unless
+  `MYCODEX_IMAGE_TAG` is set;
 - attaches to the configured tmux session.
+
+For ordinary startup, `myCodex` only inspects local Docker image tags. It does
+not query remote registries to find a newer image. `myCodex pull` performs
+remote tag discovery through `regctl`, `crane`, or `skopeo` plus `jq` when
+available, falling back to the latest `@openai/codex` npm version with Docker
+manifest verification.
 
 The default state volume is shared across projects:
 
@@ -201,7 +209,9 @@ Environment variables:
 | `CODEX_AUTO_ATTACH` | `0` | Attach automatically during interactive container startup. |
 | `MYCODEX_WAIT_TIMEOUT_SECONDS` | `30` | Startup readiness timeout for `docker compose up --wait`. |
 | `MYCODEX_STATE_VOLUME_NAME` | `codex_state` | Docker volume mounted at `/root/`. |
-| `MYCODEX_IMAGE_NAME` | `ghcr.io/infrasecture/harness-workstation` | Image name used by the build helper. |
+| `MYCODEX_IMAGE_NAME` | `ghcr.io/infrasecture/harness-workstation` | Image name used by build and runtime helpers. |
+| `MYCODEX_IMAGE_TAG` | latest local semver | Runtime image tag. Set to `latest` to opt into mutable-tag behavior. |
+| `MYCODEX_CODEX_NPM_PACKAGE` | `@openai/codex` | npm package used for fallback latest-version discovery. |
 | `WORKSPACE_DIR` | `./` | Host path mounted at `/workspace` when running Compose directly. |
 
 Build arguments:

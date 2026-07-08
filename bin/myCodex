@@ -4,10 +4,14 @@ set -euo pipefail
 SCRIPT_PATH="$(realpath -- "${BASH_SOURCE[0]}")"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${SCRIPT_PATH}")" && pwd)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+source "${SCRIPT_DIR}/lib/mycodex-image.sh"
+
 COMPOSE_FILE="${PROJECT_ROOT}/docker-compose.yaml"
 SERVICE="${CODEX_SERVICE:-codex}"
 SESSION="${CODEX_BYOBU_SESSION:-codex}"
 WAIT_TIMEOUT_SECONDS="${MYCODEX_WAIT_TIMEOUT_SECONDS:-30}"
+IMAGE_NAME="${MYCODEX_IMAGE_NAME:-${MYCODEX_DEFAULT_IMAGE_NAME}}"
+IMAGE_TAG="${MYCODEX_IMAGE_TAG:-}"
 
 CALLER_DIR="$(pwd -P)"
 RAW_NAME="$(basename -- "${CALLER_DIR}")"
@@ -242,6 +246,42 @@ ensure_extra_volumes_override() {
   } >"${EXTRA_VOLUME_OVERRIDE_FILE}"
 }
 
+ensure_runtime_image_tag() {
+  local scope="${1:-local}"
+
+  if [[ -n "${IMAGE_TAG}" ]]; then
+    return
+  fi
+
+  case "${scope}" in
+    local)
+      IMAGE_TAG="$(mycodex_resolve_latest_local_image_tag "${IMAGE_NAME}")"
+      ;;
+    remote)
+      IMAGE_TAG="$(mycodex_resolve_latest_remote_image_tag "${IMAGE_NAME}")"
+      ;;
+    *)
+      die "unknown image tag resolution scope: ${scope}"
+      ;;
+  esac
+
+  echo "myCodex: using ${IMAGE_NAME}:${IMAGE_TAG}" >&2
+}
+
+has_arg() {
+  local needle="$1"
+  shift
+
+  local arg
+  for arg in "$@"; do
+    if [[ "${arg}" == "${needle}" ]]; then
+      return 0
+    fi
+  done
+
+  return 1
+}
+
 compose_args() {
   printf '%s\n' -p "${PROJECT_NAME}" -f "${COMPOSE_FILE}"
   local file
@@ -254,6 +294,19 @@ compose_args() {
 }
 
 compose_run() {
+  local image_tag_scope=""
+  if [[ "${1:-}" == "--resolve-local-image-tag" ]]; then
+    image_tag_scope="local"
+    shift
+  elif [[ "${1:-}" == "--resolve-remote-image-tag" ]]; then
+    image_tag_scope="remote"
+    shift
+  fi
+
+  if [[ -n "${image_tag_scope}" ]]; then
+    ensure_runtime_image_tag "${image_tag_scope}"
+  fi
+
   ensure_state_volume
   ensure_extra_volumes_override
   local args=()
@@ -264,10 +317,25 @@ compose_run() {
     CODEX_CONTAINER_NAME="${CONTAINER_NAME}" \
     MYCODEX_ATTACH_HINT="${SCRIPT_DIR}/myCodex" \
     MYCODEX_STATE_VOLUME_NAME="${STATE_VOLUME_NAME}" \
+    MYCODEX_IMAGE_NAME="${IMAGE_NAME}" \
+    MYCODEX_IMAGE_TAG="${IMAGE_TAG:-latest}" \
     docker compose "${args[@]}" "$@"
 }
 
 compose() {
+  local image_tag_scope=""
+  if [[ "${1:-}" == "--resolve-local-image-tag" ]]; then
+    image_tag_scope="local"
+    shift
+  elif [[ "${1:-}" == "--resolve-remote-image-tag" ]]; then
+    image_tag_scope="remote"
+    shift
+  fi
+
+  if [[ -n "${image_tag_scope}" ]]; then
+    ensure_runtime_image_tag "${image_tag_scope}"
+  fi
+
   ensure_state_volume
   ensure_extra_volumes_override
   local args=()
@@ -278,6 +346,8 @@ compose() {
     CODEX_CONTAINER_NAME="${CONTAINER_NAME}" \
     MYCODEX_ATTACH_HINT="${SCRIPT_DIR}/myCodex" \
     MYCODEX_STATE_VOLUME_NAME="${STATE_VOLUME_NAME}" \
+    MYCODEX_IMAGE_NAME="${IMAGE_NAME}" \
+    MYCODEX_IMAGE_TAG="${IMAGE_TAG:-latest}" \
     docker compose "${args[@]}" "$@"
 }
 
@@ -294,7 +364,7 @@ start_stack() {
     compose_run config >/dev/null
   fi
 
-  compose_run up -d --wait --wait-timeout "${WAIT_TIMEOUT_SECONDS}"
+  compose_run --resolve-local-image-tag up -d --no-build --wait --wait-timeout "${WAIT_TIMEOUT_SECONDS}"
 }
 
 run_default() {
@@ -351,6 +421,16 @@ case "${subcommand}" in
       exit 2
     fi
     compose exec -it "${SERVICE}" "$@"
+    ;;
+  up|create)
+    if has_arg --build "$@" || has_arg --no-build "$@"; then
+      compose --resolve-local-image-tag "${subcommand}" "$@"
+    else
+      compose --resolve-local-image-tag "${subcommand}" --no-build "$@"
+    fi
+    ;;
+  pull)
+    compose --resolve-remote-image-tag "${subcommand}" "$@"
     ;;
   *)
     compose "${subcommand}" "$@"

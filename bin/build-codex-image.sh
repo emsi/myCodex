@@ -4,9 +4,11 @@ set -euo pipefail
 SCRIPT_PATH="$(realpath -- "${BASH_SOURCE[0]}")"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${SCRIPT_PATH}")" && pwd)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+source "${SCRIPT_DIR}/lib/mycodex-image.sh"
+
 COMPOSE_FILE="${PROJECT_ROOT}/docker-compose.yaml"
 SERVICE="${CODEX_SERVICE:-codex}"
-IMAGE_NAME="${MYCODEX_IMAGE_NAME:-ghcr.io/infrasecture/harness-workstation}"
+IMAGE_NAME="${MYCODEX_IMAGE_NAME:-${MYCODEX_DEFAULT_IMAGE_NAME}}"
 
 usage() {
   cat <<'EOF'
@@ -59,12 +61,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "${VERSION}" ]]; then
-  VERSION="$(npm view @openai/codex version --silent | tr -d '[:space:]')"
-fi
-
-if [[ -z "${VERSION}" ]]; then
-  echo "Failed to resolve Codex version from npm registry." >&2
-  exit 1
+  VERSION="$(mycodex_resolve_latest_codex_version)"
 fi
 
 if [[ "${REFRESH_TAGS}" != "1" ]] && docker image inspect "${IMAGE_NAME}:${VERSION}" >/dev/null 2>&1; then
@@ -74,7 +71,10 @@ if [[ "${REFRESH_TAGS}" != "1" ]] && docker image inspect "${IMAGE_NAME}:${VERSI
 fi
 
 echo "Building ${IMAGE_NAME} with CODEX_VERSION=${VERSION}"
-CODEX_VERSION="${VERSION}" docker compose -f "${COMPOSE_FILE}" build "${SERVICE}"
+CODEX_VERSION="${VERSION}" \
+  MYCODEX_IMAGE_NAME="${IMAGE_NAME}" \
+  MYCODEX_IMAGE_TAG=latest \
+  docker compose -f "${COMPOSE_FILE}" build "${SERVICE}"
 
 docker image tag "${IMAGE_NAME}:latest" "${IMAGE_NAME}:${VERSION}"
 
