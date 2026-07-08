@@ -74,13 +74,18 @@ runtime user, because tmux sockets and agent state will live under that user.
   and the persistent home mount target.
 - `bin/myCodex` passes host UID/GID, username/group, supplementary group specs,
   host home, same-path workdir, and Codex home to Compose.
-- `entrypoint.sh` creates groups and users, writes passwordless sudoers, owns
-  the mounted home directory only when that mounted home is empty, owns the
-  small Codex/Claude bootstrap paths it creates, initializes Codex and Claude
-  config files if missing, and starts byobu/tmux as the runtime user.
+- `entrypoint.sh` creates groups and users, writes passwordless sudoers, runs
+  first-run home bootstrap for empty state volumes, owns the small Codex/Claude
+  bootstrap paths it creates, initializes Codex and Claude config files if
+  missing, writes startup phase markers, and starts byobu/tmux as the runtime
+  user.
 - Existing image users/groups with matching UID/GID are renamed to the host
   username/group name when the requested names are available. Numeric identity
   remains authoritative.
+- `bin/myCodex` starts the stack in detached mode and reports container
+  status, health, and entrypoint phase markers while waiting for readiness.
+- `bin/myCodex down -v` removes the wrapper-managed state volume after Compose
+  removes the stack.
 
 ## Validation Notes
 
@@ -121,3 +126,16 @@ runtime user, because tmux sockets and agent state will live under that user.
   - home directory remains usable as `1000:1000`
   - pre-existing root-owned sentinel remains `0:0`
   - Codex and Claude config files are created
+- Disposable startup feedback test from `/tmp/mycodex-startup-feedback-test`
+  with `MYCODEX_IMAGE_TAG=host-user-dev`, `--private-env`, and `up -d --wait`
+  printed startup phase/status lines and reached readiness.
+- Disposable `down -v` test verified that the private
+  `mycodex-startup-feedback-test_codex_state` volume is removed.
+- Default-tag private startup from `/home/emsi/git/myCodex` with
+  `ghcr.io/infrasecture/harness-workstation:0.143.0` reached readiness after
+  one second and wrote entrypoint phase logs.
+- Default-tag private startup from `/tmp/mycodex-outside-home-test` reached
+  readiness after one second with tmux pane path
+  `/tmp/mycodex-outside-home-test`.
+- Repeated `down -v` on the `/tmp/mycodex-outside-home-test` stack reports
+  `state volume mycodex-outside-home-test_codex_state did not exist`.

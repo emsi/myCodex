@@ -10,8 +10,14 @@ HOST_GROUP_SPECS="${MYCODEX_HOST_GROUPS:-${RUNTIME_GID}:${REQUESTED_GROUP}}"
 RUNTIME_HOME="${MYCODEX_CONTAINER_HOME:-/home/${REQUESTED_USER}}"
 RUNTIME_WORKDIR="${MYCODEX_WORKDIR:-/workspace}"
 CODEX_HOME="${CODEX_HOME:-${RUNTIME_HOME}/.codex}"
+STARTUP_STATUS_FILE="/run/mycodex-startup-status"
 
 cd /
+
+startup_status() {
+  printf '%s\n' "$*" >"${STARTUP_STATUS_FILE}" 2>/dev/null || true
+  printf 'myCodex: %s\n' "$*" >&2
+}
 
 sanitize_account_name() {
   local value="$1"
@@ -42,7 +48,7 @@ group_name_for_gid() {
   group_name="$(getent group "${gid}" | field 1 || true)"
   if [[ -n "${group_name}" ]]; then
     if [[ "${group_name}" != "${requested_name}" ]] && ! getent group "${requested_name}" >/dev/null 2>&1; then
-      groupmod --new-name "${requested_name}" "${group_name}"
+      groupmod --new-name "${requested_name}" "${group_name}" >/dev/null
       group_name="${requested_name}"
     fi
     printf '%s\n' "${group_name}"
@@ -53,7 +59,7 @@ group_name_for_gid() {
     requested_name="mycodex-${gid}"
   fi
 
-  groupadd --gid "${gid}" "${requested_name}"
+  groupadd --gid "${gid}" "${requested_name}" >/dev/null
   printf '%s\n' "${requested_name}"
 }
 
@@ -77,10 +83,10 @@ ensure_runtime_user() {
   if [[ -n "${uid_entry}" ]]; then
     existing_name="$(printf '%s\n' "${uid_entry}" | field 1)"
     if [[ "${existing_name}" != "${requested_user}" ]] && [[ -z "${name_entry}" ]]; then
-      usermod --login "${requested_user}" "${existing_name}"
+      usermod --login "${requested_user}" "${existing_name}" >/dev/null
       existing_name="${requested_user}"
     fi
-    usermod --gid "${primary_group}" --home "${home}" --shell /bin/bash "${existing_name}"
+    usermod --gid "${primary_group}" --home "${home}" --shell /bin/bash "${existing_name}" >/dev/null
     printf '%s\n' "${existing_name}"
     return
   fi
@@ -98,7 +104,7 @@ ensure_runtime_user() {
     --home-dir "${home}" \
     --shell /bin/bash \
     --no-create-home \
-    "${requested_user}"
+    "${requested_user}" >/dev/null
   printf '%s\n' "${requested_user}"
 }
 
@@ -122,7 +128,7 @@ ensure_supplementary_groups() {
 
   if [[ ${#groups[@]} -gt 0 && "${runtime_user}" != "root" ]]; then
     local IFS=,
-    usermod --append --groups "${groups[*]}" "${runtime_user}"
+    usermod --append --groups "${groups[*]}" "${runtime_user}" >/dev/null
   fi
 }
 
@@ -144,20 +150,67 @@ home_is_empty() {
   [[ -z "$(find "${home}" -xdev -mindepth 1 -maxdepth 1 -print -quit)" ]]
 }
 
+home_contains_only_workdir_mount_path() {
+  local home="$1"
+  local workdir="$2"
+  local rel first entry extra
+
+  [[ "${workdir}" == "${home}/"* ]] || return 1
+
+  rel="${workdir#"${home}/"}"
+  first="${rel%%/*}"
+  entry="$(find "${home}" -xdev -mindepth 1 -maxdepth 1 -print -quit)"
+  [[ "${entry}" == "${home}/${first}" ]] || return 1
+
+  extra="$(find "${home}" -xdev -mindepth 1 -maxdepth 1 ! -path "${home}/${first}" -print -quit)"
+  [[ -z "${extra}" ]]
+}
+
+chown_workdir_parent_path() {
+  local home="$1"
+  local workdir="$2"
+  local uid="$3"
+  local gid="$4"
+  local rel parent
+  local -a parent_parts
+
+  [[ "${workdir}" == "${home}/"* ]] || return 0
+
+  rel="${workdir#"${home}/"}"
+  parent="${rel%/*}"
+  [[ "${parent}" != "${rel}" ]] || return 0
+
+  local path="${home}"
+  local part
+  IFS='/' read -r -a parent_parts <<<"${parent}"
+  for part in "${parent_parts[@]}"; do
+    path="${path}/${part}"
+    [[ -e "${path}" ]] || continue
+    [[ "${path}" != "${workdir}" ]] || continue
+    chown "${uid}:${gid}" "${path}"
+  done
+}
+
 bootstrap_empty_home_volume() {
   local home="$1"
   local uid="$2"
   local gid="$3"
+  local workdir="$4"
   local state_dir="${home}/.mycodex"
   local state_file="${state_dir}/home-bootstrap.env"
 
   mkdir -p "${home}"
 
-  if ! home_is_empty "${home}"; then
+  if [[ -e "${state_file}" ]]; then
+    return
+  fi
+
+  if ! home_is_empty "${home}" && ! home_contains_only_workdir_mount_path "${home}" "${workdir}"; then
     return
   fi
 
   chown "${uid}:${gid}" "${home}"
+  chown_workdir_parent_path "${home}" "${workdir}" "${uid}" "${gid}"
   mkdir -p "${state_dir}"
   chown "${uid}:${gid}" "${state_dir}"
 
@@ -219,6 +272,17 @@ EOF
   chown "${RUNTIME_UID}:${RUNTIME_GID}" "${settings_file}"
 }
 
+mark_sudo_notice_seen() {
+  local notice_file="${RUNTIME_HOME}/.sudo_as_admin_successful"
+
+  if [[ -e "${notice_file}" ]]; then
+    return
+  fi
+
+  : >"${notice_file}"
+  chown "${RUNTIME_UID}:${RUNTIME_GID}" "${notice_file}"
+}
+
 as_runtime_user() {
   gosu "${RUNTIME_USER}" \
     env \
@@ -243,16 +307,21 @@ exec_as_runtime_user() {
       "$@"
 }
 
+startup_status "configuring runtime user"
 PRIMARY_GROUP="$(group_name_for_gid "${RUNTIME_GID}" "${REQUESTED_GROUP}")"
 RUNTIME_USER="$(ensure_runtime_user "${RUNTIME_UID}" "${RUNTIME_GID}" "${REQUESTED_USER}" "${PRIMARY_GROUP}" "${RUNTIME_HOME}")"
 ensure_supplementary_groups "${RUNTIME_USER}" "${HOST_GROUP_SPECS}"
 ensure_passwordless_sudo "${RUNTIME_USER}"
 
+startup_status "preparing workspace and home"
+bootstrap_empty_home_volume "${RUNTIME_HOME}" "${RUNTIME_UID}" "${RUNTIME_GID}" "${RUNTIME_WORKDIR}"
 mkdir -p "${RUNTIME_WORKDIR}"
-bootstrap_empty_home_volume "${RUNTIME_HOME}" "${RUNTIME_UID}" "${RUNTIME_GID}"
+startup_status "initializing tool configuration"
 initialize_codex_config
 initialize_claude_config
+mark_sudo_notice_seen
 
+startup_status "preparing workspace compatibility path"
 if [[ "${RUNTIME_WORKDIR}" != "/workspace" ]]; then
   if rmdir /workspace 2>/dev/null; then
     ln -s "${RUNTIME_WORKDIR}" /workspace || true
@@ -260,16 +329,16 @@ if [[ "${RUNTIME_WORKDIR}" != "/workspace" ]]; then
 fi
 
 # Prefer screen-like key bindings without interactive prompt.
+startup_status "configuring byobu"
 as_runtime_user byobu-ctrl-a screen >/dev/null 2>&1 || true
 
 # Ensure a named tmux session exists, created via Byobu wrapper.
 if ! as_runtime_user byobu-tmux has-session -t "${SESSION}" 2>/dev/null; then
+  startup_status "creating tmux session"
   STARTUP_CMD="$(cat <<'EOF'
 cd "${MYCODEX_WORKDIR}"
 clear
 cat /etc/mycodex/session-banner.txt
-echo
-echo "To attach back to the session run ${MYCODEX_ATTACH_HINT:-<path_to_myCodex>/myCodex} again in the same project dir."
 exec bash --login
 EOF
 )"
@@ -277,12 +346,15 @@ EOF
 fi
 
 if [[ $# -gt 0 ]]; then
+  startup_status "running command"
   # shellcheck disable=SC2016 # Expanded by the target user's login shell.
   exec_as_runtime_user bash --login -c 'cd "${MYCODEX_WORKDIR}"; exec "$@"' bash "$@"
 fi
 
 if [[ -t 0 && -t 1 && "${CODEX_AUTO_ATTACH:-0}" == "1" ]]; then
+  startup_status "attaching"
   exec_as_runtime_user byobu -r "${SESSION}"
 fi
 
+startup_status "ready"
 exec_as_runtime_user sleep infinity
