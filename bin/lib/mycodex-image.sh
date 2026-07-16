@@ -31,7 +31,8 @@ mycodex_latest_semver_from_tags() {
   local latest_stable
 
   tags="$(
-    sed -nE 's/^[[:space:]]*"?([0-9]+[.][0-9]+[.][0-9]+([-+][0-9A-Za-z.-]+)?)"?[[:space:]]*$/\1/p'
+    sed -nE 's/^[[:space:]]*"?([0-9]+[.][0-9]+[.][0-9]+([-+][0-9A-Za-z.-]+)?)"?[[:space:]]*$/\1/p' \
+      | sed -E '/-(amd64|arm64|arm|386|s390x|ppc64le|riscv64)$/d'
   )"
 
   latest_stable="$(

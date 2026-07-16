@@ -13,8 +13,7 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     env:
-      REGISTRY: ghcr.io
-      IMAGE_NAME: ${{ github.repository_owner }}/mycodex
+      MYCODEX_IMAGE_NAME: ghcr.io/infrasecture/harness-workstation
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -27,10 +26,13 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Setup QEMU
+        uses: docker/setup-qemu-action@v3
+
       - name: Login to GHCR
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
@@ -39,12 +41,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          VERSION="$(npm view @openai/codex version --silent | tr -d '[:space:]')"
-          if [[ -z "${VERSION}" ]]; then
-            echo "Failed to resolve @openai/codex version from npm"
-            exit 1
-          fi
-          IMAGE="${REGISTRY}/${IMAGE_NAME,,}"
+          source bin/lib/mycodex-image.sh
+          VERSION="$(mycodex_resolve_latest_codex_version)"
+          IMAGE="${MYCODEX_IMAGE_NAME}"
           echo "codex_version=${VERSION}" >> "${GITHUB_OUTPUT}"
           echo "image=${IMAGE}" >> "${GITHUB_OUTPUT}"
           echo "Resolved Codex version: ${VERSION}"
@@ -65,20 +64,15 @@ jobs:
             echo "New version detected: ${IMAGE}:${VERSION}"
           fi
 
-      - name: Build and Push Image
+      - name: Build and Push Images
         if: steps.check.outputs.exists == 'false'
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ./Dockerfile
-          push: true
-          build-args: |
-            CODEX_VERSION=${{ steps.version.outputs.codex_version }}
-          tags: |
-            ${{ steps.version.outputs.image }}:latest
-            ${{ steps.version.outputs.image }}:${{ steps.version.outputs.codex_version }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./bin/build-codex-image.sh \
+            --version "${{ steps.version.outputs.codex_version }}" \
+            --release \
+            --push
 
       - name: Summary
         shell: bash
@@ -88,5 +82,6 @@ jobs:
           if [[ "${{ steps.check.outputs.exists }}" == "true" ]]; then
             echo "No publish needed. ${IMAGE}:${VERSION} already exists."
           else
-            echo "Published ${IMAGE}:${VERSION} and updated ${IMAGE}:latest."
+            echo "Published ${IMAGE}:${VERSION}-amd64 and ${IMAGE}:${VERSION}-arm64."
+            echo "Updated manifest tags ${IMAGE}:${VERSION} and ${IMAGE}:latest."
           fi
