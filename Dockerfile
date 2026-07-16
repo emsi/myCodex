@@ -14,6 +14,7 @@ ENV PATH=${CARGO_HOME}/bin:${PATH}
 # Full-fat dev/workstation tools + Byobu (tmux backend; DO NOT install screen)
 RUN apt-get update && apt-get install -y \
     byobu tmux \
+    sudo gosu \
     git git-lfs \
     ripgrep fd-find \
     curl wget \
@@ -62,8 +63,9 @@ RUN (type -p wget >/dev/null || (sudo apt update && sudo apt install wget -y)) \
 
 RUN rm -rf /tmp/* /tmp/.[a-zA-Z0-9]*
 
-# Workspace + Codex state dir (persist /root/.codex via docker-compose volume)
-RUN mkdir -p /workspace /root/.codex
+# Workspace + default runtime home. myCodex overrides both at runtime so
+# container paths can match host paths.
+RUN mkdir -p /workspace /home/codex
 WORKDIR /workspace
 
 # Configure npm global install behavior once.
@@ -87,15 +89,6 @@ RUN npm install -g "@openai/codex@${CODEX_VERSION}"
 # Fail fast: prove Codex CLI is installed and runnable
 RUN command -v codex && codex --version
 
-# Default Codex runtime policy: no approvals and no sandboxing
-RUN tee /root/.codex/config.toml >/dev/null <<'EOF'
-approval_policy = "never"
-sandbox_mode = "danger-full-access"
-
-[projects."/workspace"]
-trust_level = "trusted"
-EOF
-
 # Session quickstart banner shown once when tmux session is created.
 RUN mkdir -p /etc/mycodex && tee /etc/mycodex/session-banner.txt >/dev/null <<'EOF'
 Codex container session is running.
@@ -110,18 +103,6 @@ Byobu/tmux quick keys:
   Detach session: Ctrl+a d
 EOF
 
-# Claude YOLO mode:
-RUN mkdir /home/vscode/.claude && tee /home/vscode/.claude/settings.json >/dev/null <<'EOF'
-{
-  "$schema": "https://json.schemastore.org/claude-code-settings.json",
-  "permissions": {
-    "defaultMode": "bypassPermissions",
-    "skipDangerousModePermissionPrompt": true
-  }
-}
-EOF
-RUN chown -R vscode:vscode /home/vscode/.claude/
-
 # Enable autocompletion for tmux sessions.
 RUN sed -i '/^#if ! shopt -oq posix; then$/,/^#fi$/ s/^#//' /etc/bash.bashrc
 
@@ -129,8 +110,11 @@ ENV LANG=en_US.UTF-8
 ENV LC_ALL=en_US.UTF-8
 ENV EDITOR=vi
 ENV TERM=xterm-256color
-ENV CODEX_HOME=/root/.codex
+ENV MYCODEX_CONTAINER_HOME=/home/codex
+ENV MYCODEX_WORKDIR=/workspace
+ENV CODEX_HOME=/home/codex/.codex
 
 COPY entrypoint.sh /usr/local/bin/
+RUN chmod 0755 /usr/local/bin/entrypoint.sh
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD []

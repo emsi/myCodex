@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 
+# shellcheck disable=SC2034 # Constants are consumed by scripts that source this file.
 MYCODEX_DEFAULT_IMAGE_NAME="ghcr.io/infrasecture/harness-workstation"
 MYCODEX_DEFAULT_CODEX_NPM_PACKAGE="@openai/codex"
 

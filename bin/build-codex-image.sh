@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_PATH="$(realpath -- "${BASH_SOURCE[0]}")"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${SCRIPT_PATH}")" && pwd)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+# shellcheck source=bin/lib/mycodex-image.sh
 source "${SCRIPT_DIR}/lib/mycodex-image.sh"
 
 COMPOSE_FILE="${PROJECT_ROOT}/docker-compose.yaml"
@@ -74,6 +75,7 @@ echo "Building ${IMAGE_NAME} with CODEX_VERSION=${VERSION}"
 CODEX_VERSION="${VERSION}" \
   MYCODEX_IMAGE_NAME="${IMAGE_NAME}" \
   MYCODEX_IMAGE_TAG=latest \
+  MYCODEX_LAUNCHED_BY_WRAPPER=build \
   docker compose -f "${COMPOSE_FILE}" build "${SERVICE}"
 
 docker image tag "${IMAGE_NAME}:latest" "${IMAGE_NAME}:${VERSION}"
