@@ -82,8 +82,8 @@ runtime user, because tmux sockets and agent state will live under that user.
 - Existing image users/groups with matching UID/GID are renamed to the host
   username/group name when the requested names are available. Numeric identity
   remains authoritative.
-- `bin/myCodex` starts the stack in detached mode and reports container
-  status, health, and entrypoint phase markers while waiting for readiness.
+- `bin/myCodex` starts the stack in detached mode and reports container status
+  and entrypoint phase markers while waiting for readiness.
 - `bin/myCodex down -v` removes the wrapper-managed state volume after Compose
   removes the stack.
 
@@ -110,7 +110,7 @@ runtime user, because tmux sockets and agent state will live under that user.
   - byobu/tmux session exists and its pane path is `/home/emsi/git/myCodex`
 - Disposable Compose smoke test from `/tmp/mycodex-compose-test` with
   `MYCODEX_IMAGE_TAG=host-user-dev` and `--private-env` verified:
-  - `myCodex up -d --wait` reaches `Healthy`
+  - `myCodex up -d --wait` reaches startup readiness
   - `myCodex exec` runs as `emsi` with UID/GID `1000:1000`
   - exec workdir is `/tmp/mycodex-compose-test`
   - `CODEX_HOME` is `/home/emsi/.codex`

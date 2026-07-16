@@ -472,7 +472,7 @@ attach_tmux() {
 
 container_state() {
   docker inspect \
-    --format '{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
+    --format '{{.State.Status}}' \
     "${CONTAINER_NAME}" 2>/dev/null || true
 }
 
@@ -500,7 +500,7 @@ container_session_ready() {
 }
 
 wait_for_container_ready() {
-  local deadline elapsed state_line state health phase last_message message_key next_progress started
+  local deadline elapsed state phase last_message message_key next_progress started
 
   validate_progress_interval
 
@@ -510,12 +510,10 @@ wait_for_container_ready() {
   next_progress="${SECONDS}"
 
   while (( SECONDS <= deadline )); do
-    state_line="$(container_state)"
-    state="${state_line%%|*}"
-    health="${state_line#*|}"
+    state="$(container_state)"
     phase="$(container_startup_status)"
     elapsed="$((SECONDS - started))s"
-    message_key="${state}|${health}|${phase}"
+    message_key="${state}|${phase}"
 
     if [[ "${state}" == "running" ]] && { [[ "${phase}" == "ready" ]] || container_session_ready; }; then
       echo "myCodex: startup ready after ${elapsed}" >&2
@@ -530,9 +528,9 @@ wait_for_container_ready() {
 
     if [[ "${message_key}" != "${last_message}" || "${SECONDS}" -ge "${next_progress}" ]]; then
       if [[ -n "${phase}" ]]; then
-        echo "myCodex: startup ${elapsed}: ${phase} (${state:-unknown}/${health:-unknown})" >&2
+        echo "myCodex: startup ${elapsed}: ${phase} (${state:-unknown})" >&2
       else
-        echo "myCodex: startup ${elapsed}: waiting for tmux session (${state:-unknown}/${health:-unknown})" >&2
+        echo "myCodex: startup ${elapsed}: waiting for tmux session (${state:-unknown})" >&2
       fi
       last_message="${message_key}"
       next_progress=$((SECONDS + STARTUP_PROGRESS_INTERVAL_SECONDS))

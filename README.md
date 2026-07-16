@@ -214,7 +214,7 @@ Environment variables:
 | `CODEX_CONTAINER_NAME` | `codex-dev` | Explicit container name when running Compose directly. |
 | `CODEX_VERSION` | `latest` | Codex npm version used during image build. |
 | `CODEX_AUTO_ATTACH` | `0` | Attach automatically during interactive container startup. |
-| `MYCODEX_WAIT_TIMEOUT_SECONDS` | `30` | Startup readiness timeout for `docker compose up --wait`. |
+| `MYCODEX_WAIT_TIMEOUT_SECONDS` | `30` | Startup readiness timeout used by `myCodex`. |
 | `MYCODEX_LAUNCHED_BY_WRAPPER` | set by `myCodex` | Compose startup guard for wrapper-provided host identity. |
 | `MYCODEX_STATE_VOLUME_NAME` | `codex_state` | Docker volume mounted as the runtime user's home. |
 | `MYCODEX_IMAGE_NAME` | `ghcr.io/infrasecture/harness-workstation` | Image name used by build and runtime helpers. |
@@ -251,8 +251,8 @@ Build arguments:
 ```
 
 - `Dockerfile` builds the agent workstation image.
-- `docker-compose.yaml` defines the `codex` service, workspace mount, health
-  check, and persistent state volume.
+- `docker-compose.yaml` defines the `codex` service, workspace mount, and
+  persistent state volume.
 - `entrypoint.sh` creates the persistent Byobu/tmux session and keeps the
   container alive.
 - `bin/myCodex` is the primary launcher and Compose wrapper.
