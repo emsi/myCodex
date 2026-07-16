@@ -200,11 +200,31 @@ normal Docker build cache:
 ./bin/build-codex-image.sh --version 0.30.1 --refresh-tags
 ```
 
-The helper builds the `codex` Compose service, tags the image, and pushes both
-tags:
+Build both release architectures and publish manifest tags:
 
-- `ghcr.io/infrasecture/harness-workstation:latest`
+```bash
+./bin/build-codex-image.sh --release --push
+```
+
+For native-host publishing, push one architecture from each host, then assemble
+the manifest tags after both arch tags exist:
+
+```bash
+ARCHS=amd64 ./bin/build-codex-image.sh --push
+ARCHS=arm64 ./bin/build-codex-image.sh --push
+./bin/build-codex-image.sh --release --manifest
+```
+
+The helper builds arch-specific staging tags and publishes manifest tags:
+
+- `ghcr.io/infrasecture/harness-workstation:<codex-version>-amd64`
+- `ghcr.io/infrasecture/harness-workstation:<codex-version>-arm64`
 - `ghcr.io/infrasecture/harness-workstation:<codex-version>`
+- `ghcr.io/infrasecture/harness-workstation:latest`
+
+Local builds also tag the native image as
+`ghcr.io/infrasecture/harness-workstation:<codex-version>` so `myCodex` can run
+the newly built version without a registry pull.
 
 ## Configuration
 
@@ -223,6 +243,8 @@ Environment variables:
 | `MYCODEX_IMAGE_NAME` | `ghcr.io/infrasecture/harness-workstation` | Image name used by build and runtime helpers. |
 | `MYCODEX_IMAGE_TAG` | latest local semver | Runtime image tag. Set to `latest` to opt into mutable-tag behavior. |
 | `MYCODEX_CODEX_NPM_PACKAGE` | `@openai/codex` | npm package used for fallback latest-version discovery. |
+| `ARCHS` | native arch | Image architectures built by `build-codex-image.sh`; `--release` defaults to `amd64 arm64`. |
+| `PUBLISH_LATEST` | `true` | Whether `build-codex-image.sh --push` or `--manifest` updates the `latest` manifest tag. |
 | `MYCODEX_HOST_UID` / `MYCODEX_HOST_GID` | set by `myCodex` | Runtime numeric user and group identity. |
 | `MYCODEX_HOST_USER` / `MYCODEX_HOST_GROUP` | set by `myCodex` | Runtime passwd/group names. |
 | `MYCODEX_HOST_GROUPS` | set by `myCodex` | Supplementary group specs passed into the container. |
@@ -249,8 +271,8 @@ Build arguments:
 └── bin
     ├── myCodex
     ├── build-codex-image.sh
-    ├── start-codex-here.sh
-    └── attach-codex.sh
+    └── lib
+        └── mycodex-image.sh
 ```
 
 - `Dockerfile` builds the agent workstation image.
@@ -260,7 +282,7 @@ Build arguments:
   container alive.
 - `bin/myCodex` is the primary launcher and Compose wrapper.
 - `bin/build-codex-image.sh` builds and tags the workstation image.
-- `bin/start-codex-here.sh` and `bin/attach-codex.sh` are legacy helpers.
+- `bin/lib/mycodex-image.sh` contains shared image tag discovery helpers.
 
 ## Publishing Checklist
 
