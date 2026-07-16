@@ -75,6 +75,7 @@ echo "Building ${IMAGE_NAME} with CODEX_VERSION=${VERSION}"
 CODEX_VERSION="${VERSION}" \
   MYCODEX_IMAGE_NAME="${IMAGE_NAME}" \
   MYCODEX_IMAGE_TAG=latest \
+  MYCODEX_LAUNCHED_BY_WRAPPER=build \
   docker compose -f "${COMPOSE_FILE}" build "${SERVICE}"
 
 docker image tag "${IMAGE_NAME}:latest" "${IMAGE_NAME}:${VERSION}"

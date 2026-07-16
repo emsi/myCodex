@@ -149,10 +149,14 @@ When invoked from a project directory, it:
 - initializes Codex and Claude defaults in that persistent home on first run;
 - appends any `-f` / `--compose-file` override files after the built-in Compose
   file;
-- starts the `codex` service with `docker compose up -d --no-build --wait`;
+- starts the `codex` service detached and reports startup progress until tmux is
+  ready;
 - resolves the runtime image to a local immutable semver tag unless
   `MYCODEX_IMAGE_TAG` is set;
 - attaches to the configured tmux session.
+
+Run containers through `bin/myCodex`. Direct `docker compose up` does not know
+the caller's host UID/GID and fails with an instruction to use the wrapper.
 
 For ordinary startup, `myCodex` only inspects local Docker image tags. It does
 not query remote registries to find a newer image. `myCodex pull` performs
@@ -211,13 +215,17 @@ Environment variables:
 | `CODEX_VERSION` | `latest` | Codex npm version used during image build. |
 | `CODEX_AUTO_ATTACH` | `0` | Attach automatically during interactive container startup. |
 | `MYCODEX_WAIT_TIMEOUT_SECONDS` | `30` | Startup readiness timeout for `docker compose up --wait`. |
+| `MYCODEX_LAUNCHED_BY_WRAPPER` | set by `myCodex` | Compose startup guard for wrapper-provided host identity. |
 | `MYCODEX_STATE_VOLUME_NAME` | `codex_state` | Docker volume mounted as the runtime user's home. |
 | `MYCODEX_IMAGE_NAME` | `ghcr.io/infrasecture/harness-workstation` | Image name used by build and runtime helpers. |
 | `MYCODEX_IMAGE_TAG` | latest local semver | Runtime image tag. Set to `latest` to opt into mutable-tag behavior. |
 | `MYCODEX_CODEX_NPM_PACKAGE` | `@openai/codex` | npm package used for fallback latest-version discovery. |
-| `MYCODEX_CONTAINER_HOME` | host `$HOME` via `myCodex`, `/home/codex` direct | Runtime home path mounted from the persistent state volume. |
-| `MYCODEX_WORKDIR` | current directory via `myCodex`, `/workspace` direct | Container workdir and workspace bind target. |
-| `WORKSPACE_DIR` | `./` | Host path mounted at `MYCODEX_WORKDIR` when running Compose directly. |
+| `MYCODEX_HOST_UID` / `MYCODEX_HOST_GID` | set by `myCodex` | Runtime numeric user and group identity. |
+| `MYCODEX_HOST_USER` / `MYCODEX_HOST_GROUP` | set by `myCodex` | Runtime passwd/group names. |
+| `MYCODEX_HOST_GROUPS` | set by `myCodex` | Supplementary group specs passed into the container. |
+| `MYCODEX_CONTAINER_HOME` | host `$HOME` via `myCodex` | Runtime home path mounted from the persistent state volume. |
+| `MYCODEX_WORKDIR` | current directory via `myCodex` | Container workdir and workspace bind target. |
+| `WORKSPACE_DIR` | current directory via `myCodex` | Host path mounted at `MYCODEX_WORKDIR`. |
 
 Build arguments:
 

@@ -2,14 +2,6 @@
 set -euo pipefail
 
 SESSION="${CODEX_BYOBU_SESSION:-codex}"
-RUNTIME_UID="${MYCODEX_HOST_UID:-1000}"
-RUNTIME_GID="${MYCODEX_HOST_GID:-1000}"
-REQUESTED_USER="${MYCODEX_HOST_USER:-codex}"
-REQUESTED_GROUP="${MYCODEX_HOST_GROUP:-codex}"
-HOST_GROUP_SPECS="${MYCODEX_HOST_GROUPS:-${RUNTIME_GID}:${REQUESTED_GROUP}}"
-RUNTIME_HOME="${MYCODEX_CONTAINER_HOME:-/home/${REQUESTED_USER}}"
-RUNTIME_WORKDIR="${MYCODEX_WORKDIR:-/workspace}"
-CODEX_HOME="${CODEX_HOME:-${RUNTIME_HOME}/.codex}"
 STARTUP_STATUS_FILE="/run/mycodex-startup-status"
 
 cd /
@@ -18,6 +10,47 @@ startup_status() {
   printf '%s\n' "$*" >"${STARTUP_STATUS_FILE}" 2>/dev/null || true
   printf 'myCodex: %s\n' "$*" >&2
 }
+
+die() {
+  printf 'myCodex: %s\n' "$*" >&2
+  exit 2
+}
+
+require_env() {
+  local name="$1"
+  local value="${!name:-}"
+
+  if [[ -z "${value}" ]]; then
+    die "missing ${name}. Start containers with ./bin/myCodex from the project directory so host UID/GID and paths are passed correctly."
+  fi
+}
+
+require_numeric_env() {
+  local name="$1"
+  local value="${!name:-}"
+
+  require_env "${name}"
+  if [[ ! "${value}" =~ ^[0-9]+$ ]]; then
+    die "${name} must be numeric, got: ${value}"
+  fi
+}
+
+require_numeric_env MYCODEX_HOST_UID
+require_numeric_env MYCODEX_HOST_GID
+require_env MYCODEX_HOST_USER
+require_env MYCODEX_HOST_GROUP
+require_env MYCODEX_HOST_GROUPS
+require_env MYCODEX_CONTAINER_HOME
+require_env MYCODEX_WORKDIR
+
+RUNTIME_UID="${MYCODEX_HOST_UID}"
+RUNTIME_GID="${MYCODEX_HOST_GID}"
+REQUESTED_USER="${MYCODEX_HOST_USER}"
+REQUESTED_GROUP="${MYCODEX_HOST_GROUP}"
+HOST_GROUP_SPECS="${MYCODEX_HOST_GROUPS}"
+RUNTIME_HOME="${MYCODEX_CONTAINER_HOME}"
+RUNTIME_WORKDIR="${MYCODEX_WORKDIR}"
+CODEX_HOME="${CODEX_HOME:-${RUNTIME_HOME}/.codex}"
 
 sanitize_account_name() {
   local value="$1"
