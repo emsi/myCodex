@@ -176,6 +176,9 @@ With `--private-env`, the state volume is project-specific:
 <project>_codex_state
 ```
 
+See [Run As Host User](docs/run-as-host-user.md) for the runtime user, path,
+state-volume, startup, and direct-Compose guard details.
+
 ## Image Builds
 
 Build the latest Codex version published on npm:
