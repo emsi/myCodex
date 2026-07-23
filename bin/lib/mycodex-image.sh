@@ -6,14 +6,27 @@ MYCODEX_DEFAULT_CODEX_NPM_PACKAGE="@openai/codex"
 
 mycodex_resolve_latest_codex_version() {
   local package="${MYCODEX_CODEX_NPM_PACKAGE:-${MYCODEX_DEFAULT_CODEX_NPM_PACKAGE}}"
+  local package_path="${package}"
   local version
 
-  if ! version="$(npm view "${package}" version --silent | tr -d '[:space:]')"; then
-    echo "Failed to resolve Codex version from npm registry: ${package}" >&2
-    return 1
+  if [[ "${package_path}" == @*/* ]]; then
+    package_path="${package_path/\//%2F}"
   fi
 
-  if [[ -z "${version}" ]]; then
+  if command -v curl >/dev/null 2>&1; then
+    version="$(
+      curl -fsSL "https://registry.npmjs.org/${package_path}/latest" \
+        | sed -nE 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' \
+        | head -n 1 \
+        | tr -d '[:space:]'
+    )"
+  fi
+
+  if [[ -z "${version:-}" ]] && command -v npm >/dev/null 2>&1; then
+    version="$(npm view "${package}" version --silent | tr -d '[:space:]')"
+  fi
+
+  if [[ -z "${version:-}" ]]; then
     echo "Failed to resolve Codex version from npm registry: ${package}" >&2
     return 1
   fi

@@ -242,7 +242,7 @@ Environment variables:
 | `MYCODEX_STATE_VOLUME_NAME` | `codex_state` | Docker volume mounted as the runtime user's home. |
 | `MYCODEX_IMAGE_NAME` | `ghcr.io/infrasecture/harness-workstation` | Image name used by build and runtime helpers. |
 | `MYCODEX_IMAGE_TAG` | latest local semver | Runtime image tag. Set to `latest` to opt into mutable-tag behavior. |
-| `MYCODEX_CODEX_NPM_PACKAGE` | `@openai/codex` | npm package used for fallback latest-version discovery. |
+| `MYCODEX_CODEX_NPM_PACKAGE` | `@openai/codex` | npm package used for latest-version discovery. |
 | `ARCHS` | native arch | Image architectures built by `build-codex-image.sh`; `--release` defaults to `amd64 arm64`. |
 | `PUBLISH_LATEST` | `true` | Whether `build-codex-image.sh --push` or `--manifest` updates the `latest` manifest tag. |
 | `MYCODEX_HOST_UID` / `MYCODEX_HOST_GID` | set by `myCodex` | Runtime numeric user and group identity. |
