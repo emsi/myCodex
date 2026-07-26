@@ -25,7 +25,9 @@ Options:
   --manifest              Create manifest tags from already-pushed arch tags
 
 Environment:
-  ARCHS                   Space-separated arch list (default: native arch)
+  ARCHS                   Arches to build this run (default: native arch)
+  RELEASE_ARCHS           Full published arch set assembled into the manifest
+                          (default: amd64 arm64)
   MYCODEX_IMAGE_NAME      Image name
   PUBLISH_LATEST          Whether --push/--manifest updates :latest (true/false)
 
@@ -34,6 +36,13 @@ Tag model:
   ghcr.io/infrasecture/harness-workstation:<version>-arm64
   ghcr.io/infrasecture/harness-workstation:<version>   registry manifest
   ghcr.io/infrasecture/harness-workstation:latest      registry manifest
+
+Multi-arch:
+  Each machine builds and pushes only its own :<version>-<arch> tag. The
+  :<version> and :latest manifests are (re)assembled from whichever
+  :<version>-<arch> tags exist in the registry across RELEASE_ARCHS, so a native
+  amd64 host and a native arm64 host can publish independently, in any order,
+  without clobbering each other's architecture. No QEMU required.
 EOF
 }
 
@@ -102,8 +111,14 @@ fi
 NATIVE_ARCH="$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')"
 HOST_OS="$(uname -s)"
 
+# The full set of architectures this image is published for. The :<version> and
+# :latest manifest lists are always assembled from whichever of these per-arch
+# tags exist in the registry (see manifest_sources), so a push from one machine
+# never drops an architecture that another machine published.
+RELEASE_ARCHS="${RELEASE_ARCHS:-amd64 arm64}"
+
 if [[ "${RELEASE_MODE}" == "true" ]]; then
-  default_archs="amd64 arm64"
+  default_archs="${RELEASE_ARCHS}"
 else
   default_archs="${NATIVE_ARCH}"
 fi
@@ -150,11 +165,19 @@ manifest_tags() {
   fi
 }
 
+# Sources for the manifest are every per-arch tag that currently exists in the
+# registry across RELEASE_ARCHS — not just the arch this machine built. That is
+# what lets two single-arch machines publish independently: each pushes only its
+# own :<version>-<arch> tag, and the manifest re-includes the other arch because
+# its tag is still present. Missing arches are simply skipped (single-arch is OK).
 manifest_sources() {
-  local arch
+  local arch tag
 
-  for arch in ${ARCHS}; do
-    arch_tag "${arch}"
+  for arch in ${RELEASE_ARCHS}; do
+    tag="$(arch_tag "${arch}")"
+    if docker buildx imagetools inspect "${tag}" >/dev/null 2>&1; then
+      printf '%s\n' "${tag}"
+    fi
   done
 }
 
@@ -164,13 +187,19 @@ create_manifest_tags() {
   mapfile -t tags < <(manifest_tags)
   mapfile -t sources < <(manifest_sources)
 
-  echo "==> Creating manifest tags"
+  if [[ "${#sources[@]}" -eq 0 ]]; then
+    echo "ERROR: no ${IMAGE_NAME}:${VERSION}-<arch> tags exist in the registry" \
+         "for any of: ${RELEASE_ARCHS}. Push at least one arch tag first." >&2
+    exit 1
+  fi
+
+  echo "==> Assembling manifest from: ${sources[*]}"
   docker buildx imagetools create "${tags[@]}" "${sources[@]}"
   echo ""
 }
 
 if [[ "${DO_MANIFEST_ONLY}" == "true" ]]; then
-  echo "==> Creating ${IMAGE_NAME} manifests for Codex ${VERSION} (${ARCHS})"
+  echo "==> Creating ${IMAGE_NAME} manifests for Codex ${VERSION} (scanning ${RELEASE_ARCHS})"
   create_manifest_tags
   echo "Manifest tags:"
   echo "  ${IMAGE_NAME}:${VERSION}"
