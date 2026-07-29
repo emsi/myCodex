@@ -121,6 +121,7 @@ services:
 Run management commands:
 
 ```bash
+myCodex info
 myCodex attach
 myCodex ps
 myCodex stop
@@ -130,6 +131,12 @@ myCodex exec bash
 myCodex logs -f codex
 myCodex down
 ```
+
+`myCodex info` prints the resolved configuration — project name, image, the
+container home and workdir, host identity, and the state volume name (and
+whether it exists) — reflecting any options on the same line (e.g.
+`myCodex --private-env info`). It is read-only: it reads volume metadata but
+never creates a volume or starts a container.
 
 Unknown subcommands are passed through to `docker compose` with the correct
 project name, Compose file, workspace mount, and container environment.
