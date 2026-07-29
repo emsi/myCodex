@@ -394,6 +394,14 @@ run_docker_compose() {
   local args=()
   mapfile -t args < <(compose_args)
 
+  # Orchestrator command, overridable so a wrapper can enforce policy without
+  # forking this script. Default is `docker compose`; set MYCODEX_COMPOSE to a
+  # replacement that accepts the same compose arguments, e.g.
+  # `vaka --vaka-file=/path/vaka.yaml compose`. The value is word-split into
+  # argv, so it must not contain paths with spaces.
+  local compose_cmd=()
+  read -ra compose_cmd <<< "${MYCODEX_COMPOSE:-docker compose}"
+
   env \
     WORKSPACE_DIR="${CALLER_DIR}" \
     CODEX_CONTAINER_NAME="${CONTAINER_NAME}" \
@@ -410,7 +418,7 @@ run_docker_compose() {
     MYCODEX_CONTAINER_HOME="${CONTAINER_HOME}" \
     MYCODEX_WORKDIR="${CONTAINER_WORKDIR}" \
     MYCODEX_CODEX_HOME="${CONTAINER_HOME}/.codex" \
-    docker compose "${args[@]}" "$@"
+    "${compose_cmd[@]}" "${args[@]}" "$@"
 }
 
 compose_run() {

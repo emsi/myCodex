@@ -238,6 +238,7 @@ Environment variables:
 | `CODEX_VERSION` | `latest` | Codex npm version used during image build. |
 | `CODEX_AUTO_ATTACH` | `0` | Attach automatically during interactive container startup. |
 | `MYCODEX_WAIT_TIMEOUT_SECONDS` | `30` | Startup readiness timeout used by `myCodex`. |
+| `MYCODEX_COMPOSE` | `docker compose` | Orchestrator command invoked for all Compose operations. Override to wrap Compose without forking `myCodex`, e.g. `vaka --vaka-file=/path/vaka.yaml compose` to enforce an egress policy. Word-split into argv, so paths in it must not contain spaces. |
 | `MYCODEX_LAUNCHED_BY_WRAPPER` | set by `myCodex` | Compose startup guard for wrapper-provided host identity. |
 | `MYCODEX_STATE_VOLUME_NAME` | `codex_state` | Docker volume mounted as the runtime user's home. |
 | `MYCODEX_IMAGE_NAME` | `ghcr.io/infrasecture/harness-workstation` | Image name used by build and runtime helpers. |
