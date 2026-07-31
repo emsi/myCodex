@@ -45,7 +45,20 @@ Do not mount host credentials unless the agent genuinely needs them.
 
 - Docker
 - Docker Compose v2
-- Bash
+- Bash 4.4 or newer
+
+The launcher uses the first `bash` found through `PATH`. On macOS, the system
+Bash is too old; install a current one with Homebrew and put it before `/bin`:
+
+```bash
+brew install bash
+export PATH="$(brew --prefix)/bin:$PATH"
+```
+
+Changing the login shell alone does not change what `#!/usr/bin/env bash`
+selects. As a convenience, when the selected Bash is too old, `myCodex` also
+tries an executable Bash 4.4+ named by `$SHELL` before failing with upgrade
+guidance.
 
 ## Quick Start
 
