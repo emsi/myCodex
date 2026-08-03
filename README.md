@@ -13,7 +13,7 @@ directory as fully available to the agent.
 ## What It Provides
 
 - A reusable Ubuntu workstation image for coding agents.
-- Codex CLI installed from npm, with optional version-pinned image builds.
+- Codex CLI installed from npm, with revisioned workstation image builds.
 - Optional Claude Code, Gemini CLI, and OpenCode installs.
 - A persistent Byobu/tmux session for attach/detach workflows.
 - A Compose launcher that mounts the current project at `/workspace`.
@@ -171,8 +171,8 @@ When invoked from a project directory, it:
   file;
 - starts the `codex` service detached and reports startup progress until tmux is
   ready;
-- resolves the runtime image to a local immutable semver tag unless
-  `MYCODEX_IMAGE_TAG` is set;
+- resolves the runtime image to the latest local immutable revision-qualified
+  tag unless `MYCODEX_IMAGE_TAG` is set;
 - attaches to the configured tmux session.
 
 Run containers through `bin/myCodex`. Direct `docker compose up` does not know
@@ -201,7 +201,18 @@ state-volume, startup, and direct-Compose guard details.
 
 ## Image Builds
 
-Build the latest Codex version published on npm:
+Image releases track the bundled Codex version and add a workstation build
+revision. For example, `0.146.0-r2` contains Codex `0.146.0` and is the second
+workstation image release for that Codex version. Revision-qualified tags are
+immutable after publication. Increment the revision whenever the Dockerfile,
+entrypoint, installed tools, or other image inputs change without a Codex
+version change.
+
+The unqualified Codex-version tag (`0.146.0`) and `latest` are moving
+convenience aliases. Runtime discovery prefers immutable revision-qualified
+tags when registry tag listing is available.
+
+Build revision 1 for the latest Codex version published on npm:
 
 ```bash
 ./bin/build-codex-image.sh
@@ -210,41 +221,58 @@ Build the latest Codex version published on npm:
 Build a specific Codex version:
 
 ```bash
-./bin/build-codex-image.sh --version 0.30.1
+./bin/build-codex-image.sh --version 0.146.0 --revision 1
 ```
 
-Refresh tags after Dockerfile or build-context changes, while still using the
-normal Docker build cache:
+During local development, rebuild the same unpublished revision with the normal
+Docker build cache:
 
 ```bash
-./bin/build-codex-image.sh --version 0.30.1 --refresh-tags
+./bin/build-codex-image.sh --version 0.146.0 --revision 2 --refresh-tags
 ```
+
+`--refresh-tags` only replaces local tags. A revision-qualified registry tag is
+never overwritten; increment `--revision` to publish changed content.
 
 Build both release architectures and publish manifest tags:
 
 ```bash
-./bin/build-codex-image.sh --release --push
+./bin/build-codex-image.sh --version 0.146.0 --revision 2 --release --push
 ```
 
-For native-host publishing, push one architecture from each host, then assemble
-the manifest tags after both arch tags exist:
+For native-host publishing, use the same Codex version, image revision, and
+`RELEASE_ARCHS` on each builder:
 
 ```bash
-ARCHS=amd64 ./bin/build-codex-image.sh --push
-ARCHS=arm64 ./bin/build-codex-image.sh --push
-./bin/build-codex-image.sh --release --manifest
+ARCHS=amd64 ./bin/build-codex-image.sh --version 0.146.0 --revision 2 --push
+ARCHS=arm64 ./bin/build-codex-image.sh --version 0.146.0 --revision 2 --push
 ```
+
+The builders may run in either order. The first push publishes its immutable
+architecture tag and reports which architectures are pending. The push that
+finds the complete `RELEASE_ARCHS` set creates the immutable multi-platform
+manifest and updates the moving aliases. If both architecture tags were pushed
+without finalization, run:
+
+```bash
+./bin/build-codex-image.sh --version 0.146.0 --revision 2 --manifest
+```
+
+The `Publish Codex Image` GitHub workflow uses the same model. Automatic Codex
+release events publish revision 1 by default. A manual dispatch can select an
+existing Codex version and a higher image revision for workstation-only fixes.
 
 The helper builds arch-specific staging tags and publishes manifest tags:
 
-- `ghcr.io/infrasecture/harness-workstation:<codex-version>-amd64`
-- `ghcr.io/infrasecture/harness-workstation:<codex-version>-arm64`
-- `ghcr.io/infrasecture/harness-workstation:<codex-version>`
-- `ghcr.io/infrasecture/harness-workstation:latest`
+- `ghcr.io/infrasecture/harness-workstation:<codex-version>-r<revision>-amd64`
+- `ghcr.io/infrasecture/harness-workstation:<codex-version>-r<revision>-arm64`
+- `ghcr.io/infrasecture/harness-workstation:<codex-version>-r<revision>` (immutable)
+- `ghcr.io/infrasecture/harness-workstation:<codex-version>` (moving alias)
+- `ghcr.io/infrasecture/harness-workstation:latest` (moving alias)
 
 Local builds also tag the native image as
-`ghcr.io/infrasecture/harness-workstation:<codex-version>` so `myCodex` can run
-the newly built version without a registry pull.
+`<codex-version>-r<revision>`, `<codex-version>`, and `latest` so `myCodex` can
+run the newly built version without a registry pull.
 
 ## Configuration
 
@@ -262,9 +290,11 @@ Environment variables:
 | `MYCODEX_LAUNCHED_BY_WRAPPER` | set by `myCodex` | Compose startup guard for wrapper-provided host identity. |
 | `MYCODEX_STATE_VOLUME_NAME` | `codex_state` | Docker volume mounted as the runtime user's home. |
 | `MYCODEX_IMAGE_NAME` | `ghcr.io/infrasecture/harness-workstation` | Image name used by build and runtime helpers. |
-| `MYCODEX_IMAGE_TAG` | latest local semver | Runtime image tag. Set to `latest` to opt into mutable-tag behavior. |
+| `MYCODEX_IMAGE_TAG` | latest local revision-qualified release | Runtime image tag. Legacy unqualified SemVer tags remain a discovery fallback; set `latest` explicitly to opt into mutable-tag behavior. |
+| `MYCODEX_IMAGE_REVISION` | `1` | Default workstation image revision used by `build-codex-image.sh`; overridden by `--revision`. |
 | `MYCODEX_CODEX_NPM_PACKAGE` | `@openai/codex` | npm package used for latest-version discovery. |
 | `ARCHS` | native arch | Image architectures built by `build-codex-image.sh`; `--release` defaults to `amd64 arm64`. |
+| `RELEASE_ARCHS` | `amd64 arm64` | Complete architecture set required before publishing the immutable release manifest and moving aliases. |
 | `PUBLISH_LATEST` | `true` | Whether `build-codex-image.sh --push` or `--manifest` updates the `latest` manifest tag. |
 | `MYCODEX_HOST_UID` / `MYCODEX_HOST_GID` | set by `myCodex` | Runtime numeric user and group identity. |
 | `MYCODEX_HOST_USER` / `MYCODEX_HOST_GROUP` | set by `myCodex` | Runtime passwd/group names. |
@@ -278,6 +308,7 @@ Build arguments:
 | Argument | Default | Description |
 | --- | --- | --- |
 | `CODEX_VERSION` | `latest` | Version of `@openai/codex` to install. |
+| `MYCODEX_IMAGE_REVISION` | `1` | Workstation image revision recorded in OCI image metadata. |
 | `INSTALL_CLAUDE_CODE` | `1` | Install Claude Code. |
 | `INSTALL_GEMINI_CLI` | `1` | Install Gemini CLI. |
 | `INSTALL_OPENCODE` | `1` | Install OpenCode. |

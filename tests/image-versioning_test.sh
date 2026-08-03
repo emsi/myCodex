@@ -60,6 +60,8 @@ latest="$({
 } | mycodex_latest_semver_from_tags)"
 assert_eq "0.146.0-r2" "${latest}" "latest immutable image release"
 assert_eq "0.146.0-r12" "$(mycodex_image_release_tag 0.146.0 12)" "release tag"
+assert_eq "0.146.0" "$(printf '%s\n' 0.145.0 0.146.0 | mycodex_latest_semver_from_tags)" \
+  "legacy unqualified release fallback"
 
 if mycodex_validate_image_revision 0 >/dev/null 2>&1; then
   fail "revision zero was accepted"
@@ -162,6 +164,7 @@ assert_ref_exists "example.test/workstation:0.146.0-r2-amd64"
 assert_ref_missing "example.test/workstation:0.146.0-r2"
 assert_ref_missing "example.test/workstation:0.146.0"
 assert_contains "${amd64_output}" "pending architecture tags: arm64"
+assert_contains "${FAKE_DOCKER_LOG}" "--build-arg MYCODEX_IMAGE_REVISION=2"
 
 : >"${FAKE_DOCKER_LOG}"
 arm64_output="${tmp_dir}/arm64.out"
@@ -180,6 +183,21 @@ assert_contains "${retry_output}" "immutable registry tag already exists"
 assert_not_contains "${FAKE_DOCKER_LOG}" "buildx build"
 assert_not_contains "${FAKE_DOCKER_LOG}" "image push"
 assert_not_contains "${FAKE_DOCKER_LOG}" "imagetools create --tag example.test/workstation:0.146.0-r2 example.test"
+
+: >"${FAKE_DOCKER_LOG}"
+: >"${FAKE_LOCAL_REFS}"
+: >"${FAKE_REMOTE_REFS}"
+arm64_first_output="${tmp_dir}/arm64-first.out"
+run_build aarch64 arm64 "${arm64_first_output}" --version 0.147.0 --revision 1 --push
+assert_ref_exists "example.test/workstation:0.147.0-r1-arm64"
+assert_ref_missing "example.test/workstation:0.147.0-r1"
+assert_contains "${arm64_first_output}" "pending architecture tags: amd64"
+
+amd64_second_output="${tmp_dir}/amd64-second.out"
+run_build x86_64 amd64 "${amd64_second_output}" --version 0.147.0 --revision 1 --push
+assert_ref_exists "example.test/workstation:0.147.0-r1-amd64"
+assert_ref_exists "example.test/workstation:0.147.0-r1"
+assert_ref_exists "example.test/workstation:0.147.0"
 
 missing_output="${tmp_dir}/missing.out"
 if run_build x86_64 amd64 "${missing_output}" --version 0.200.0 --revision 1 --manifest; then
