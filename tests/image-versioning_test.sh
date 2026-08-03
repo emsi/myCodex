@@ -62,6 +62,9 @@ assert_eq "0.146.0-r2" "${latest}" "latest immutable image release"
 assert_eq "0.146.0-r12" "$(mycodex_image_release_tag 0.146.0 12)" "release tag"
 assert_eq "0.146.0" "$(printf '%s\n' 0.145.0 0.146.0 | mycodex_latest_semver_from_tags)" \
   "legacy unqualified release fallback"
+assert_eq "0.147.0" \
+  "$(printf '%s\n' 0.146.0-r2 0.147.0 | mycodex_latest_semver_from_tags)" \
+  "newer legacy release during migration"
 
 if mycodex_validate_image_revision 0 >/dev/null 2>&1; then
   fail "revision zero was accepted"
@@ -88,8 +91,15 @@ docker() {
   printf '%s\n' "$*" >>"${FAKE_DOCKER_LOG}"
 
   if [[ "$1 $2 $3" == "buildx imagetools inspect" ]]; then
-    grep -Fxq -- "$4" "${FAKE_REMOTE_REFS}"
-    return
+    if [[ "${FAKE_INSPECT_ERROR_REF:-}" == "$4" ]]; then
+      printf 'unauthorized: simulated registry failure\n' >&2
+      return 1
+    fi
+    if grep -Fxq -- "$4" "${FAKE_REMOTE_REFS}"; then
+      return 0
+    fi
+    printf '%s: not found\n' "$4" >&2
+    return 1
   fi
 
   if [[ "$1 $2" == "image inspect" ]]; then
@@ -210,5 +220,14 @@ if run_build x86_64 amd64 "${invalid_output}" --version 0.146.0 --revision 01; t
   fail "build accepted a non-canonical image revision"
 fi
 assert_contains "${invalid_output}" "positive integer without leading zeros"
+
+registry_error_output="${tmp_dir}/registry-error.out"
+export FAKE_INSPECT_ERROR_REF="example.test/workstation:0.300.0-r1-amd64"
+if run_build x86_64 amd64 "${registry_error_output}" --version 0.300.0 --revision 1 --push; then
+  fail "build treated a registry inspection error as a missing immutable tag"
+fi
+unset FAKE_INSPECT_ERROR_REF
+assert_contains "${registry_error_output}" "cannot determine whether registry tag exists"
+assert_not_contains "${registry_error_output}" "Building example.test/workstation:0.300.0-r1-amd64"
 
 printf 'PASS: image release versioning and split-builder publication\n'

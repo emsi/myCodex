@@ -65,7 +65,6 @@ mycodex_resolve_latest_codex_version() {
 
 mycodex_latest_semver_from_tags() {
   local tags
-  local latest_release
   local latest_stable
 
   tags="$(
@@ -73,21 +72,9 @@ mycodex_latest_semver_from_tags() {
       | sed -E '/-(amd64|arm64|arm|386|s390x|ppc64le|riscv64)$/d'
   )"
 
-  latest_release="$(
-    printf '%s\n' "${tags}" \
-      | sed -nE '/-r[1-9][0-9]*$/p' \
-      | sort -V \
-      | tail -n 1
-  )"
-
-  if [[ -n "${latest_release}" ]]; then
-    printf '%s\n' "${latest_release}"
-    return
-  fi
-
   latest_stable="$(
     printf '%s\n' "${tags}" \
-      | sed -nE '/^[0-9]+[.][0-9]+[.][0-9]+$/p' \
+      | sed -nE '/^[0-9]+[.][0-9]+[.][0-9]+(-r[1-9][0-9]*)?$/p' \
       | sort -V \
       | tail -n 1
   )"

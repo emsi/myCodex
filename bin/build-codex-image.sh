@@ -129,10 +129,9 @@ RELEASE_TAG="$(mycodex_image_release_tag "${VERSION}" "${IMAGE_REVISION}")"
 NATIVE_ARCH="$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')"
 HOST_OS="$(uname -s)"
 
-# The full set of architectures this image is published for. The :<version> and
-# :latest manifest lists are always assembled from whichever of these per-arch
-# tags exist in the registry (see manifest_sources), so a push from one machine
-# never drops an architecture that another machine published.
+# The complete architecture set required for a release. Manifest publication is
+# deferred until every corresponding revision-qualified arch tag exists, so a
+# push from one native builder never publishes a partial final manifest.
 RELEASE_ARCHS="${RELEASE_ARCHS:-amd64 arm64}"
 
 if [[ "${RELEASE_MODE}" == "true" ]]; then
@@ -181,7 +180,25 @@ release_ref() {
 }
 
 remote_ref_exists() {
-  docker buildx imagetools inspect "$1" >/dev/null 2>&1
+  local ref="$1"
+  local output normalized
+
+  if output="$(docker buildx imagetools inspect "${ref}" 2>&1)"; then
+    return 0
+  fi
+
+  normalized="$(printf '%s' "${output}" | tr '[:upper:]' '[:lower:]')"
+  case "${normalized}" in
+    *"not found"*|*"manifest unknown"*|*"no such manifest"*)
+      return 1
+      ;;
+  esac
+
+  echo "ERROR: cannot determine whether registry tag exists: ${ref}" >&2
+  if [[ -n "${output}" ]]; then
+    printf '%s\n' "${output}" >&2
+  fi
+  exit 1
 }
 
 MANIFEST_SOURCES=()
