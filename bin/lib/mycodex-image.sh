@@ -4,6 +4,33 @@
 MYCODEX_DEFAULT_IMAGE_NAME="ghcr.io/infrasecture/harness-workstation"
 MYCODEX_DEFAULT_CODEX_NPM_PACKAGE="@openai/codex"
 
+mycodex_validate_codex_version() {
+  local version="$1"
+
+  if [[ ! "${version}" =~ ^[0-9]+[.][0-9]+[.][0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+    echo "Codex version is not semver-like: ${version}" >&2
+    return 1
+  fi
+}
+
+mycodex_validate_image_revision() {
+  local revision="$1"
+
+  if [[ ! "${revision}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Image revision must be a positive integer without leading zeros: ${revision}" >&2
+    return 1
+  fi
+}
+
+mycodex_image_release_tag() {
+  local codex_version="$1"
+  local image_revision="$2"
+
+  mycodex_validate_codex_version "${codex_version}" || return
+  mycodex_validate_image_revision "${image_revision}" || return
+  printf '%s-r%s\n' "${codex_version}" "${image_revision}"
+}
+
 mycodex_resolve_latest_codex_version() {
   local package="${MYCODEX_CODEX_NPM_PACKAGE:-${MYCODEX_DEFAULT_CODEX_NPM_PACKAGE}}"
   local package_path="${package}"
@@ -31,22 +58,32 @@ mycodex_resolve_latest_codex_version() {
     return 1
   fi
 
-  if [[ ! "${version}" =~ ^[0-9]+[.][0-9]+[.][0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
-    echo "Resolved Codex version is not semver-like: ${version}" >&2
-    return 1
-  fi
+  mycodex_validate_codex_version "${version}" || return
 
   printf '%s\n' "${version}"
 }
 
 mycodex_latest_semver_from_tags() {
   local tags
+  local latest_release
   local latest_stable
 
   tags="$(
     sed -nE 's/^[[:space:]]*"?([0-9]+[.][0-9]+[.][0-9]+([-+][0-9A-Za-z.-]+)?)"?[[:space:]]*$/\1/p' \
       | sed -E '/-(amd64|arm64|arm|386|s390x|ppc64le|riscv64)$/d'
   )"
+
+  latest_release="$(
+    printf '%s\n' "${tags}" \
+      | sed -nE '/-r[1-9][0-9]*$/p' \
+      | sort -V \
+      | tail -n 1
+  )"
+
+  if [[ -n "${latest_release}" ]]; then
+    printf '%s\n' "${latest_release}"
+    return
+  fi
 
   latest_stable="$(
     printf '%s\n' "${tags}" \
