@@ -198,6 +198,8 @@ remote_ref_exists() {
 MANIFEST_SOURCES=()
 MISSING_ARCHES=()
 FINALIZATION_STATE="not-run"
+UPDATED_ALIAS_REFS=()
+SKIPPED_ALIAS_REFS=()
 
 collect_manifest_sources() {
   local arch tag
@@ -214,14 +216,134 @@ collect_manifest_sources() {
   done
 }
 
+REMOTE_IDENTITY_VERSION=""
+REMOTE_IDENTITY_REVISION=""
+
+remote_release_identity() {
+  local ref="$1"
+  local output version revision extra
+  local found_identity=false found_legacy=false
+
+  if ! output="$(
+    docker buildx imagetools inspect "${ref}" --format \
+      '{{range $platform, $image := .Image}}{{printf "%s|%s\n" (index $image.Config.Labels "io.infrasecture.mycodex.codex.version") (index $image.Config.Labels "io.infrasecture.mycodex.image.revision")}}{{end}}' \
+      2>&1
+  )"; then
+    echo "ERROR: cannot inspect release identity for ${ref}" >&2
+    printf '%s\n' "${output}" >&2
+    return 2
+  fi
+
+  REMOTE_IDENTITY_VERSION=""
+  REMOTE_IDENTITY_REVISION=""
+  while IFS='|' read -r version revision extra; do
+    if [[ -z "${version}" && -z "${revision}" ]]; then
+      found_legacy=true
+      continue
+    fi
+    if [[ -n "${extra:-}" ]] \
+      || ! mycodex_validate_codex_version "${version}" >/dev/null 2>&1 \
+      || ! mycodex_validate_image_revision "${revision}" >/dev/null 2>&1; then
+      echo "ERROR: invalid release identity on ${ref}: ${output}" >&2
+      return 2
+    fi
+    if [[ "${found_identity}" == "true" ]] \
+      && { [[ "${version}" != "${REMOTE_IDENTITY_VERSION}" ]] \
+        || [[ "${revision}" != "${REMOTE_IDENTITY_REVISION}" ]]; }; then
+      echo "ERROR: inconsistent platform release identities on ${ref}: ${output}" >&2
+      return 2
+    fi
+    REMOTE_IDENTITY_VERSION="${version}"
+    REMOTE_IDENTITY_REVISION="${revision}"
+    found_identity=true
+  done <<<"${output}"
+
+  if [[ "${found_identity}" != "true" ]]; then
+    return 1
+  fi
+  if [[ "${found_legacy}" == "true" ]]; then
+    echo "ERROR: incomplete platform release metadata on ${ref}: ${output}" >&2
+    return 2
+  fi
+}
+
+alias_promotion_allowed() {
+  local ref="$1"
+  local alias_kind="$2"
+  local status comparison latest_codex
+
+  if ! remote_ref_exists "${ref}"; then
+    return 0
+  fi
+
+  if remote_release_identity "${ref}"; then
+    comparison="$(
+      mycodex_compare_image_releases \
+        "${VERSION}" "${IMAGE_REVISION}" \
+        "${REMOTE_IDENTITY_VERSION}" "${REMOTE_IDENTITY_REVISION}"
+    )"
+    if [[ "${comparison}" -lt 0 ]]; then
+      echo "==> Keeping newer moving alias ${ref} at ${REMOTE_IDENTITY_VERSION}-r${REMOTE_IDENTITY_REVISION}"
+      echo "    Candidate ${RELEASE_TAG} is older and cannot replace it."
+      return 1
+    fi
+    return 0
+  else
+    status=$?
+  fi
+
+  if [[ "${status}" -ne 1 ]]; then
+    exit "${status}"
+  fi
+
+  if [[ "${alias_kind}" == "version" ]]; then
+    echo "==> Migrating legacy moving alias ${ref} to revisioned release metadata"
+    return 0
+  fi
+
+  if latest_codex="$(mycodex_resolve_latest_codex_version)" \
+    && [[ "${VERSION}" == "${latest_codex}" ]]; then
+    echo "==> Migrating legacy latest alias ${ref} to ${RELEASE_TAG}"
+    return 0
+  fi
+
+  echo "==> Keeping legacy moving alias ${ref} unchanged"
+  if [[ -n "${latest_codex:-}" ]]; then
+    echo "    Candidate Codex ${VERSION} is not npm latest ${latest_codex}."
+  else
+    echo "    The current alias has no release metadata and npm latest could not be verified."
+  fi
+  return 1
+}
+
 publish_moving_aliases() {
-  local immutable_ref
+  local immutable_ref version_ref latest_ref
   local -a alias_tags
 
   immutable_ref="$(release_ref)"
-  alias_tags=(--tag "${IMAGE_NAME}:${VERSION}")
+  version_ref="${IMAGE_NAME}:${VERSION}"
+  latest_ref="${IMAGE_NAME}:latest"
+  alias_tags=()
+
+  if alias_promotion_allowed "${version_ref}" version; then
+    alias_tags+=(--tag "${version_ref}")
+    UPDATED_ALIAS_REFS+=("${version_ref}")
+  else
+    SKIPPED_ALIAS_REFS+=("${version_ref}")
+  fi
   if [[ "${PUBLISH_LATEST}" == "true" ]]; then
-    alias_tags+=(--tag "${IMAGE_NAME}:latest")
+    if alias_promotion_allowed "${latest_ref}" latest; then
+      alias_tags+=(--tag "${latest_ref}")
+      UPDATED_ALIAS_REFS+=("${latest_ref}")
+    else
+      SKIPPED_ALIAS_REFS+=("${latest_ref}")
+    fi
+  fi
+
+  if [[ "${#alias_tags[@]}" -eq 0 ]]; then
+    echo "==> No moving aliases were eligible for monotonic promotion"
+    echo ""
+    return
   fi
 
   echo "==> Updating moving aliases from ${immutable_ref}"
@@ -257,7 +379,7 @@ finalize_release_manifest() {
       echo ""
       return 0
     fi
-    echo "    Explicit --manifest finalization will update moving aliases."
+    echo "    Explicit --manifest finalization will evaluate moving aliases for monotonic promotion."
   else
     echo "==> Creating immutable manifest ${immutable_ref} from: ${MANIFEST_SOURCES[*]}"
     docker buildx imagetools create --tag "${immutable_ref}" "${MANIFEST_SOURCES[@]}"
@@ -269,11 +391,15 @@ finalize_release_manifest() {
 if [[ "${DO_MANIFEST_ONLY}" == "true" ]]; then
   echo "==> Finalizing ${IMAGE_NAME}:${RELEASE_TAG} (scanning ${RELEASE_ARCHS})"
   finalize_release_manifest true true
-  echo "Manifest tags:"
+  echo "Immutable manifest:"
   echo "  ${IMAGE_NAME}:${RELEASE_TAG}"
-  echo "  ${IMAGE_NAME}:${VERSION}"
-  if [[ "${PUBLISH_LATEST}" == "true" ]]; then
-    echo "  ${IMAGE_NAME}:latest"
+  if [[ "${#UPDATED_ALIAS_REFS[@]}" -gt 0 ]]; then
+    echo "Updated moving aliases:"
+    printf '  %s\n' "${UPDATED_ALIAS_REFS[@]}"
+  fi
+  if [[ "${#SKIPPED_ALIAS_REFS[@]}" -gt 0 ]]; then
+    echo "Protected moving aliases left unchanged:"
+    printf '  %s\n' "${SKIPPED_ALIAS_REFS[@]}"
   fi
   exit 0
 fi
@@ -368,11 +494,15 @@ fi
 if [[ "${DO_PUSH}" == "true" ]]; then
   echo ""
   if [[ "${FINALIZATION_STATE}" == "created" ]]; then
-    echo "Published registry manifest tags:"
+    echo "Published immutable registry manifest:"
     echo "  ${IMAGE_NAME}:${RELEASE_TAG}"
-    echo "  ${IMAGE_NAME}:${VERSION}"
-    if [[ "${PUBLISH_LATEST}" == "true" ]]; then
-      echo "  ${IMAGE_NAME}:latest"
+    if [[ "${#UPDATED_ALIAS_REFS[@]}" -gt 0 ]]; then
+      echo "Updated moving aliases:"
+      printf '  %s\n' "${UPDATED_ALIAS_REFS[@]}"
+    fi
+    if [[ "${#SKIPPED_ALIAS_REFS[@]}" -gt 0 ]]; then
+      echo "Protected moving aliases left unchanged:"
+      printf '  %s\n' "${SKIPPED_ALIAS_REFS[@]}"
     fi
   elif [[ "${FINALIZATION_STATE}" == "existing" ]]; then
     echo "Existing immutable registry manifest:"

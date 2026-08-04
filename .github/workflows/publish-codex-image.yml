@@ -116,5 +116,6 @@ jobs:
           else
             echo "Published ${IMAGE}:${RELEASE_TAG}-amd64 and ${IMAGE}:${RELEASE_TAG}-arm64."
             echo "Published immutable manifest ${IMAGE}:${RELEASE_TAG}."
-            echo "Updated moving aliases ${IMAGE}:${VERSION} and ${IMAGE}:latest."
+            echo "Moving aliases were updated only where monotonic promotion allowed it."
+            echo "See the build output for the status of ${IMAGE}:${VERSION} and ${IMAGE}:latest."
           fi

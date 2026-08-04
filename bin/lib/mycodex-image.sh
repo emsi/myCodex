@@ -37,6 +37,120 @@ mycodex_image_release_tag() {
   printf '%s-r%s\n' "${codex_version}" "${image_revision}"
 }
 
+mycodex_compare_numeric_identifiers() {
+  local left="$1"
+  local right="$2"
+
+  while [[ "${#left}" -gt 1 && "${left}" == 0* ]]; do
+    left="${left#0}"
+  done
+  while [[ "${#right}" -gt 1 && "${right}" == 0* ]]; do
+    right="${right#0}"
+  done
+
+  if [[ "${#left}" -lt "${#right}" ]]; then
+    printf '%s\n' -1
+  elif [[ "${#left}" -gt "${#right}" ]]; then
+    printf '%s\n' 1
+  elif [[ "${left}" == "${right}" ]]; then
+    printf '%s\n' 0
+  elif [[ "${left}" < "${right}" ]]; then
+    printf '%s\n' -1
+  else
+    printf '%s\n' 1
+  fi
+}
+
+# Prints -1, 0, or 1 using SemVer precedence. Versions are validated by the
+# caller; build metadata is intentionally ignored for precedence.
+mycodex_compare_semver() {
+  local left="${1%%+*}"
+  local right="${2%%+*}"
+  local left_core="${left%%-*}"
+  local right_core="${right%%-*}"
+  local left_pre="" right_pre=""
+  local comparison i left_part right_part
+  local -a left_core_parts right_core_parts left_pre_parts right_pre_parts
+  local LC_ALL=C
+
+  if [[ "${left}" == *-* ]]; then
+    left_pre="${left#*-}"
+  fi
+  if [[ "${right}" == *-* ]]; then
+    right_pre="${right#*-}"
+  fi
+
+  IFS='.' read -r -a left_core_parts <<<"${left_core}"
+  IFS='.' read -r -a right_core_parts <<<"${right_core}"
+  for i in 0 1 2; do
+    comparison="$(mycodex_compare_numeric_identifiers "${left_core_parts[$i]}" "${right_core_parts[$i]}")"
+    if [[ "${comparison}" != 0 ]]; then
+      printf '%s\n' "${comparison}"
+      return
+    fi
+  done
+
+  if [[ -z "${left_pre}" && -z "${right_pre}" ]]; then
+    printf '%s\n' 0
+    return
+  elif [[ -z "${left_pre}" ]]; then
+    printf '%s\n' 1
+    return
+  elif [[ -z "${right_pre}" ]]; then
+    printf '%s\n' -1
+    return
+  fi
+
+  IFS='.' read -r -a left_pre_parts <<<"${left_pre}"
+  IFS='.' read -r -a right_pre_parts <<<"${right_pre}"
+  for ((i = 0; i < ${#left_pre_parts[@]} || i < ${#right_pre_parts[@]}; i++)); do
+    if [[ "${i}" -ge "${#left_pre_parts[@]}" ]]; then
+      printf '%s\n' -1
+      return
+    elif [[ "${i}" -ge "${#right_pre_parts[@]}" ]]; then
+      printf '%s\n' 1
+      return
+    fi
+
+    left_part="${left_pre_parts[$i]}"
+    right_part="${right_pre_parts[$i]}"
+    if [[ "${left_part}" == "${right_part}" ]]; then
+      continue
+    fi
+
+    if [[ "${left_part}" =~ ^[0-9]+$ && "${right_part}" =~ ^[0-9]+$ ]]; then
+      mycodex_compare_numeric_identifiers "${left_part}" "${right_part}"
+    elif [[ "${left_part}" =~ ^[0-9]+$ ]]; then
+      printf '%s\n' -1
+    elif [[ "${right_part}" =~ ^[0-9]+$ ]]; then
+      printf '%s\n' 1
+    elif [[ "${left_part}" < "${right_part}" ]]; then
+      printf '%s\n' -1
+    else
+      printf '%s\n' 1
+    fi
+    return
+  done
+
+  printf '%s\n' 0
+}
+
+mycodex_compare_image_releases() {
+  local left_version="$1"
+  local left_revision="$2"
+  local right_version="$3"
+  local right_revision="$4"
+  local comparison
+
+  comparison="$(mycodex_compare_semver "${left_version}" "${right_version}")"
+  if [[ "${comparison}" != 0 ]]; then
+    printf '%s\n' "${comparison}"
+    return
+  fi
+
+  mycodex_compare_numeric_identifiers "${left_revision}" "${right_revision}"
+}
+
 # Returns 0 when the registry reference exists, 1 when the registry explicitly
 # reports it missing, and 2 when its state cannot be determined safely.
 mycodex_registry_ref_exists() {
