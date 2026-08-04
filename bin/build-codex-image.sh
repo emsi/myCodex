@@ -26,8 +26,8 @@ Options:
                           never overwrites revision-qualified registry tags
   --release               Build the release arch set: amd64 arm64
   --push                  Push this build's arch tags; finalize when complete
-  --manifest              Finalize a complete arch set and explicitly update
-                          its moving <version>/latest aliases
+  --manifest              Finalize a complete arch set and re-evaluate its
+                          moving aliases under monotonic promotion rules
 
 Environment:
   ARCHS                   Arches to build this run (default: native arch)
@@ -35,7 +35,8 @@ Environment:
                           (default: amd64 arm64)
   MYCODEX_IMAGE_NAME      Image name
   MYCODEX_IMAGE_REVISION  Default image revision (default: 1)
-  PUBLISH_LATEST          Whether --push/--manifest updates :latest (true/false)
+  PUBLISH_LATEST          Whether eligible --push/--manifest promotions include
+                          :latest (true/false; monotonic protection always applies)
 
 Tag model:
   ghcr.io/infrasecture/harness-workstation:<version>-r<revision>-amd64
@@ -48,7 +49,7 @@ Multi-arch:
   Each machine builds and pushes only its own revision-qualified arch tag. The
   first builder exits successfully with a pending-architecture message. Once
   every RELEASE_ARCHS tag exists, the immutable release manifest is created and
-  the moving <version>/latest aliases are updated. Builders may run in either
+  eligible moving aliases are promoted monotonically. Builders may run in either
   order without QEMU or cross-architecture tag replacement.
 EOF
 }
