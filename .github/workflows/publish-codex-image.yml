@@ -78,14 +78,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          source bin/lib/mycodex-image.sh
           IMAGE="${{ steps.version.outputs.image }}"
           RELEASE_TAG="${{ steps.version.outputs.release_tag }}"
-          if docker buildx imagetools inspect "${IMAGE}:${RELEASE_TAG}" >/dev/null 2>&1; then
+          REF="${IMAGE}:${RELEASE_TAG}"
+          if mycodex_registry_ref_exists "${REF}"; then
             echo "exists=true" >> "${GITHUB_OUTPUT}"
-            echo "Immutable image release already exists: ${IMAGE}:${RELEASE_TAG}"
+            echo "Immutable image release already exists: ${REF}"
           else
+            status=$?
+            if [[ "${status}" -ne 1 ]]; then
+              exit "${status}"
+            fi
             echo "exists=false" >> "${GITHUB_OUTPUT}"
-            echo "New image release: ${IMAGE}:${RELEASE_TAG}"
+            echo "New image release: ${REF}"
           fi
 
       - name: Build and Push Images

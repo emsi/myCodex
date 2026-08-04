@@ -180,25 +180,18 @@ release_ref() {
 }
 
 remote_ref_exists() {
-  local ref="$1"
-  local output normalized
+  local status
 
-  if output="$(docker buildx imagetools inspect "${ref}" 2>&1)"; then
+  if mycodex_registry_ref_exists "$1"; then
     return 0
+  else
+    status=$?
   fi
 
-  normalized="$(printf '%s' "${output}" | tr '[:upper:]' '[:lower:]')"
-  case "${normalized}" in
-    *"not found"*|*"manifest unknown"*|*"no such manifest"*)
-      return 1
-      ;;
-  esac
-
-  echo "ERROR: cannot determine whether registry tag exists: ${ref}" >&2
-  if [[ -n "${output}" ]]; then
-    printf '%s\n' "${output}" >&2
+  if [[ "${status}" -eq 1 ]]; then
+    return 1
   fi
-  exit 1
+  exit "${status}"
 }
 
 MANIFEST_SOURCES=()

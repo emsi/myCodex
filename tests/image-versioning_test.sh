@@ -166,6 +166,22 @@ uname() {
 }
 export -f uname
 
+probe_output="${tmp_dir}/probe-error.out"
+export FAKE_INSPECT_ERROR_REF="example.test/workstation:probe-error"
+set +e
+mycodex_registry_ref_exists "${FAKE_INSPECT_ERROR_REF}" >"${probe_output}" 2>&1
+probe_status=$?
+set -e
+unset FAKE_INSPECT_ERROR_REF
+assert_eq "2" "${probe_status}" "indeterminate registry probe status"
+assert_contains "${probe_output}" "cannot determine whether registry tag exists"
+
+set +e
+mycodex_registry_ref_exists "example.test/workstation:missing" >/dev/null 2>&1
+probe_status=$?
+set -e
+assert_eq "1" "${probe_status}" "missing registry probe status"
+
 run_build() {
   local machine="$1"
   local archs="$2"

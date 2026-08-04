@@ -31,6 +31,30 @@ mycodex_image_release_tag() {
   printf '%s-r%s\n' "${codex_version}" "${image_revision}"
 }
 
+# Returns 0 when the registry reference exists, 1 when the registry explicitly
+# reports it missing, and 2 when its state cannot be determined safely.
+mycodex_registry_ref_exists() {
+  local ref="$1"
+  local output normalized
+
+  if output="$(docker buildx imagetools inspect "${ref}" 2>&1)"; then
+    return 0
+  fi
+
+  normalized="$(printf '%s' "${output}" | tr '[:upper:]' '[:lower:]')"
+  case "${normalized}" in
+    *"not found"*|*"manifest unknown"*|*"no such manifest"*)
+      return 1
+      ;;
+  esac
+
+  echo "ERROR: cannot determine whether registry tag exists: ${ref}" >&2
+  if [[ -n "${output}" ]]; then
+    printf '%s\n' "${output}" >&2
+  fi
+  return 2
+}
+
 mycodex_resolve_latest_codex_version() {
   local package="${MYCODEX_CODEX_NPM_PACKAGE:-${MYCODEX_DEFAULT_CODEX_NPM_PACKAGE}}"
   local package_path="${package}"
