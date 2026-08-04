@@ -35,6 +35,17 @@ assert_not_contains() {
   fi
 }
 
+assert_occurrences() {
+  local file="$1"
+  local text="$2"
+  local want="$3"
+  local got
+
+  got="$(grep -Fxc -- "${text}" "${file}" || true)"
+  [[ "${got}" == "${want}" ]] \
+    || fail "${file} contains ${text@Q} ${got} times, want ${want}"
+}
+
 assert_ref_exists() {
   local ref="$1"
 
@@ -185,6 +196,9 @@ assert_ref_exists "example.test/workstation:0.146.0"
 assert_ref_exists "example.test/workstation:latest"
 assert_contains "${FAKE_DOCKER_LOG}" "buildx imagetools create --tag example.test/workstation:0.146.0-r2 example.test/workstation:0.146.0-r2-amd64 example.test/workstation:0.146.0-r2-arm64"
 assert_contains "${FAKE_DOCKER_LOG}" "buildx imagetools create --tag example.test/workstation:0.146.0 --tag example.test/workstation:latest example.test/workstation:0.146.0-r2"
+assert_occurrences "${FAKE_DOCKER_LOG}" "buildx imagetools inspect example.test/workstation:0.146.0-r2-amd64" 1
+assert_occurrences "${FAKE_DOCKER_LOG}" "buildx imagetools inspect example.test/workstation:0.146.0-r2-arm64" 2
+assert_occurrences "${FAKE_DOCKER_LOG}" "buildx imagetools inspect example.test/workstation:0.146.0-r2" 1
 
 : >"${FAKE_DOCKER_LOG}"
 retry_output="${tmp_dir}/retry.out"
@@ -192,7 +206,8 @@ run_build x86_64 amd64 "${retry_output}" --version 0.146.0 --revision 2 --refres
 assert_contains "${retry_output}" "immutable registry tag already exists"
 assert_not_contains "${FAKE_DOCKER_LOG}" "buildx build"
 assert_not_contains "${FAKE_DOCKER_LOG}" "image push"
-assert_not_contains "${FAKE_DOCKER_LOG}" "imagetools create --tag example.test/workstation:0.146.0-r2 example.test"
+assert_not_contains "${FAKE_DOCKER_LOG}" "imagetools create"
+assert_contains "${retry_output}" "Moving registry aliases were not changed."
 
 : >"${FAKE_DOCKER_LOG}"
 : >"${FAKE_LOCAL_REFS}"
@@ -208,6 +223,21 @@ run_build x86_64 amd64 "${amd64_second_output}" --version 0.147.0 --revision 1 -
 assert_ref_exists "example.test/workstation:0.147.0-r1-amd64"
 assert_ref_exists "example.test/workstation:0.147.0-r1"
 assert_ref_exists "example.test/workstation:0.147.0"
+
+record_ref "${FAKE_REMOTE_REFS}" "example.test/workstation:0.146.0-r2-amd64"
+record_ref "${FAKE_REMOTE_REFS}" "example.test/workstation:0.146.0-r2-arm64"
+record_ref "${FAKE_REMOTE_REFS}" "example.test/workstation:0.146.0-r2"
+: >"${FAKE_DOCKER_LOG}"
+older_retry_output="${tmp_dir}/older-retry.out"
+run_build x86_64 amd64 "${older_retry_output}" --version 0.146.0 --revision 2 --push
+assert_not_contains "${FAKE_DOCKER_LOG}" "imagetools create"
+assert_contains "${older_retry_output}" "Moving registry aliases were not changed."
+
+: >"${FAKE_DOCKER_LOG}"
+explicit_promotion_output="${tmp_dir}/explicit-promotion.out"
+run_build x86_64 amd64 "${explicit_promotion_output}" --version 0.146.0 --revision 2 --manifest
+assert_contains "${explicit_promotion_output}" "Explicit --manifest finalization will update moving aliases."
+assert_contains "${FAKE_DOCKER_LOG}" "buildx imagetools create --tag example.test/workstation:0.146.0 --tag example.test/workstation:latest example.test/workstation:0.146.0-r2"
 
 missing_output="${tmp_dir}/missing.out"
 if run_build x86_64 amd64 "${missing_output}" --version 0.200.0 --revision 1 --manifest; then

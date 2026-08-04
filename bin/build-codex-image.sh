@@ -203,6 +203,7 @@ remote_ref_exists() {
 
 MANIFEST_SOURCES=()
 MISSING_ARCHES=()
+FINALIZATION_STATE="not-run"
 
 collect_manifest_sources() {
   local arch tag
@@ -236,8 +237,10 @@ publish_moving_aliases() {
 
 finalize_release_manifest() {
   local require_complete="$1"
+  local promote_existing="$2"
   local immutable_ref
 
+  FINALIZATION_STATE="pending"
   collect_manifest_sources
   if [[ "${#MISSING_ARCHES[@]}" -gt 0 ]]; then
     if [[ "${require_complete}" == "true" ]]; then
@@ -253,17 +256,25 @@ finalize_release_manifest() {
 
   immutable_ref="$(release_ref)"
   if remote_ref_exists "${immutable_ref}"; then
+    FINALIZATION_STATE="existing"
     echo "==> Keeping existing immutable manifest ${immutable_ref}"
+    if [[ "${promote_existing}" != "true" ]]; then
+      echo "    Moving aliases were left unchanged."
+      echo ""
+      return 0
+    fi
+    echo "    Explicit --manifest finalization will update moving aliases."
   else
     echo "==> Creating immutable manifest ${immutable_ref} from: ${MANIFEST_SOURCES[*]}"
     docker buildx imagetools create --tag "${immutable_ref}" "${MANIFEST_SOURCES[@]}"
+    FINALIZATION_STATE="created"
   fi
   publish_moving_aliases
 }
 
 if [[ "${DO_MANIFEST_ONLY}" == "true" ]]; then
   echo "==> Finalizing ${IMAGE_NAME}:${RELEASE_TAG} (scanning ${RELEASE_ARCHS})"
-  finalize_release_manifest true
+  finalize_release_manifest true true
   echo "Manifest tags:"
   echo "  ${IMAGE_NAME}:${RELEASE_TAG}"
   echo "  ${IMAGE_NAME}:${VERSION}"
@@ -341,7 +352,7 @@ if [[ "${DO_PUSH}" == "true" ]]; then
   done
   echo ""
 
-  finalize_release_manifest false
+  finalize_release_manifest false false
 fi
 
 echo "Build complete."
@@ -361,13 +372,16 @@ if printf '%s\n' "${BUILT_ARCHS[@]}" | grep -qFx "${NATIVE_ARCH}"; then
 fi
 if [[ "${DO_PUSH}" == "true" ]]; then
   echo ""
-  collect_manifest_sources
-  if [[ "${#MISSING_ARCHES[@]}" -eq 0 ]] && remote_ref_exists "$(release_ref)"; then
-    echo "Registry manifest tags:"
+  if [[ "${FINALIZATION_STATE}" == "created" ]]; then
+    echo "Published registry manifest tags:"
     echo "  ${IMAGE_NAME}:${RELEASE_TAG}"
     echo "  ${IMAGE_NAME}:${VERSION}"
     if [[ "${PUBLISH_LATEST}" == "true" ]]; then
       echo "  ${IMAGE_NAME}:latest"
     fi
+  elif [[ "${FINALIZATION_STATE}" == "existing" ]]; then
+    echo "Existing immutable registry manifest:"
+    echo "  ${IMAGE_NAME}:${RELEASE_TAG}"
+    echo "Moving registry aliases were not changed."
   fi
 fi
