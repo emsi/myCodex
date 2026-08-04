@@ -187,6 +187,19 @@ probe_status=$?
 set -e
 assert_eq "1" "${probe_status}" "missing registry probe status"
 
+missing_docker_output="${tmp_dir}/missing-docker.out"
+set +e
+(
+  unset -f docker
+  # shellcheck disable=SC2123 # Deliberately hide host executables for this probe.
+  PATH="${tmp_dir}/empty-path"
+  mycodex_registry_ref_exists "example.test/workstation:unknown"
+) >"${missing_docker_output}" 2>&1
+probe_status=$?
+set -e
+assert_eq "2" "${probe_status}" "missing Docker registry probe status"
+assert_contains "${missing_docker_output}" "without the Docker CLI"
+
 run_build() {
   local machine="$1"
   local archs="$2"

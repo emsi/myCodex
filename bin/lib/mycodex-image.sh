@@ -43,13 +43,18 @@ mycodex_registry_ref_exists() {
   local ref="$1"
   local output normalized
 
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "ERROR: cannot inspect registry tag without the Docker CLI: ${ref}" >&2
+    return 2
+  fi
+
   if output="$(docker buildx imagetools inspect "${ref}" 2>&1)"; then
     return 0
   fi
 
   normalized="$(printf '%s' "${output}" | tr '[:upper:]' '[:lower:]')"
   case "${normalized}" in
-    *"not found"*|*"manifest unknown"*|*"no such manifest"*)
+    *": not found"*|*"manifest unknown"*|*"no such manifest"*)
       return 1
       ;;
   esac
