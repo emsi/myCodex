@@ -23,7 +23,8 @@ services:
       MYCODEX_CONTAINER_HOME: ${MYCODEX_CONTAINER_HOME:-/home/codex}
       MYCODEX_WORKDIR: ${MYCODEX_WORKDIR:-/workspace}
       CODEX_HOME: ${MYCODEX_CODEX_HOME:-/home/codex/.codex}
-      CODEX_BYOBU_SESSION: codex
+      CODEX_BYOBU_SESSION: ${CODEX_BYOBU_SESSION:-codex}
+      CODEX_AUTO_ATTACH: ${CODEX_AUTO_ATTACH:-0}
       MYCODEX_ATTACH_HINT: "${MYCODEX_ATTACH_HINT:-<path_to_myCodex>/myCodex}"
 
     volumes:
