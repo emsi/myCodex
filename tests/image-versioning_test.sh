@@ -83,6 +83,11 @@ fi
 if mycodex_validate_image_revision 01 >/dev/null 2>&1; then
   fail "revision with a leading zero was accepted"
 fi
+reserved_version_output="$(mycodex_validate_codex_version 0.146.0-r2 2>&1 || true)"
+assert_eq \
+  $'Codex version includes the reserved image revision suffix: 0.146.0-r2\nPass it separately, for example: --version 0.146.0 --revision 2' \
+  "${reserved_version_output}" \
+  "revision-qualified Codex version guidance"
 
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/mycodex-image-versioning.XXXXXX")"
 trap 'rm -rf -- "${tmp_dir}"' EXIT
@@ -224,6 +229,7 @@ assert_not_contains "${FAKE_DOCKER_LOG}" "buildx build"
 assert_not_contains "${FAKE_DOCKER_LOG}" "image push"
 assert_not_contains "${FAKE_DOCKER_LOG}" "imagetools create"
 assert_contains "${retry_output}" "Moving registry aliases were not changed."
+assert_contains "${retry_output}" "No local image or local aliases were created."
 
 : >"${FAKE_DOCKER_LOG}"
 : >"${FAKE_LOCAL_REFS}"
@@ -266,6 +272,12 @@ if run_build x86_64 amd64 "${invalid_output}" --version 0.146.0 --revision 01; t
   fail "build accepted a non-canonical image revision"
 fi
 assert_contains "${invalid_output}" "positive integer without leading zeros"
+
+reserved_version_build_output="${tmp_dir}/reserved-version.out"
+if run_build x86_64 amd64 "${reserved_version_build_output}" --version 0.146.0-r2 --revision 3; then
+  fail "build accepted an image release tag as a Codex version"
+fi
+assert_contains "${reserved_version_build_output}" "--version 0.146.0 --revision 2"
 
 registry_error_output="${tmp_dir}/registry-error.out"
 export FAKE_INSPECT_ERROR_REF="example.test/workstation:0.300.0-r1-amd64"

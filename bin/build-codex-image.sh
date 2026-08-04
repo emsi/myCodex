@@ -26,7 +26,8 @@ Options:
                           never overwrites revision-qualified registry tags
   --release               Build the release arch set: amd64 arm64
   --push                  Push this build's arch tags; finalize when complete
-  --manifest              Finalize from an already-pushed complete arch set
+  --manifest              Finalize a complete arch set and explicitly update
+                          its moving <version>/latest aliases
 
 Environment:
   ARCHS                   Arches to build this run (default: native arch)
@@ -298,6 +299,7 @@ for ARCH in ${ARCHS}; do
   if [[ "${REMOTE_ARCH_TAGS[${ARCH}]:-false}" == "true" ]]; then
     echo "==> Skipping ${tag} (immutable registry tag already exists)"
     echo "    Increment --revision to publish changed workstation content."
+    echo "    No local image or local aliases were created."
     echo ""
     continue
   fi

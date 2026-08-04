@@ -7,6 +7,12 @@ MYCODEX_DEFAULT_CODEX_NPM_PACKAGE="@openai/codex"
 mycodex_validate_codex_version() {
   local version="$1"
 
+  if [[ "${version}" =~ -r[0-9]+$ ]]; then
+    echo "Codex version includes the reserved image revision suffix: ${version}" >&2
+    echo "Pass it separately, for example: --version ${version%-r*} --revision ${version##*-r}" >&2
+    return 1
+  fi
+
   if [[ ! "${version}" =~ ^[0-9]+[.][0-9]+[.][0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
     echo "Codex version is not semver-like: ${version}" >&2
     return 1

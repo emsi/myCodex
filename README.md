@@ -206,7 +206,8 @@ revision. For example, `0.146.0-r2` contains Codex `0.146.0` and is the second
 workstation image release for that Codex version. Revision-qualified tags are
 immutable after publication. Increment the revision whenever the Dockerfile,
 entrypoint, installed tools, or other image inputs change without a Codex
-version change.
+version change. The terminal `-r<number>` suffix is reserved for this image
+revision; pass the upstream Codex version and image revision separately.
 
 The unqualified Codex-version tag (`0.146.0`) and `latest` are moving
 convenience aliases. Runtime discovery prefers immutable revision-qualified
@@ -251,12 +252,23 @@ ARCHS=arm64 ./bin/build-codex-image.sh --version 0.146.0 --revision 2 --push
 The builders may run in either order. The first push publishes its immutable
 architecture tag and reports which architectures are pending. The push that
 finds the complete `RELEASE_ARCHS` set creates the immutable multi-platform
-manifest and updates the moving aliases. If both architecture tags were pushed
-without finalization, run:
+manifest and updates the moving aliases. A retry that finds its immutable
+architecture tag already in the registry does not pull it and does not create
+local `<version>-r<revision>`, `<version>`, or `latest` aliases.
+
+Normal `--push` retries never update moving aliases when the immutable release
+manifest already exists, so retrying an older release cannot move `latest`
+backwards. If both architecture tags were pushed without finalization, or an
+alias update failed after the immutable manifest was created, run:
 
 ```bash
 ./bin/build-codex-image.sh --version 0.146.0 --revision 2 --manifest
 ```
+
+`--manifest` is the explicit promotion and recovery operation. It reapplies the
+moving `<version>` alias and, unless `PUBLISH_LATEST=false`, `latest`, even when
+the immutable manifest already exists. Use it only for the release that should
+be promoted.
 
 The `Publish Codex Image` GitHub workflow uses the same model. Automatic Codex
 release events publish revision 1 by default. A manual dispatch can select an
