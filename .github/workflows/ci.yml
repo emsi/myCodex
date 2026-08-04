@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check shell syntax
+        run: |
+          bash -n entrypoint.sh bin/myCodex bin/build-codex-image.sh \
+            bin/lib/mycodex-image.sh tests/image-versioning_test.sh \
+            tests/launcher-config_test.sh
+
+      - name: Run ShellCheck
+        run: |
+          shellcheck -x entrypoint.sh bin/myCodex bin/build-codex-image.sh \
+            bin/lib/mycodex-image.sh tests/image-versioning_test.sh \
+            tests/launcher-config_test.sh
+
+      - name: Test image versioning
+        run: ./tests/image-versioning_test.sh
+
+      - name: Test launcher configuration
+        run: ./tests/launcher-config_test.sh

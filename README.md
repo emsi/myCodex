@@ -13,11 +13,13 @@ directory as fully available to the agent.
 ## What It Provides
 
 - A reusable Ubuntu workstation image for coding agents.
-- Codex CLI installed from npm, with optional version-pinned image builds.
+- Codex CLI installed from npm, with revisioned workstation image builds.
 - Optional Claude Code, Gemini CLI, and OpenCode installs.
 - A persistent Byobu/tmux session for attach/detach workflows.
-- A Compose launcher that mounts the current project at `/workspace`.
-- Shared or per-project persistent state under `/root/`.
+- A Compose launcher that mounts the current project at the same absolute path
+  inside the container.
+- Shared, custom, or per-project persistent state mounted as the runtime user's
+  home directory.
 - Support for extra bind mounts using Docker `-v` syntax.
 - Common development tools: Git, Git LFS, GitHub CLI, ripgrep, fd, jq, yq, fzf,
   build toolchains, Python, Node.js, Rust, ShellCheck, and debugging/networking
@@ -30,12 +32,13 @@ This project prioritizes agent autonomy over isolation.
 - Codex config:
   - `approval_policy = "never"`
   - `sandbox_mode = "danger-full-access"`
-  - `/workspace` is marked trusted
+  - the selected project workdir is marked trusted
 - Claude Code config:
   - `defaultMode = "bypassPermissions"`
   - dangerous-mode prompts are skipped
-- The project directory is mounted read-write at `/workspace`.
-- Persistent state is mounted at `/root/`.
+- The project directory is mounted read-write at the same absolute path used on
+  the host.
+- Persistent state is mounted at the runtime user's host-style home path.
 - Extra mounts can expose host files, credentials, caches, or tools.
 
 Use private state volumes and minimal mounts when working with sensitive code.
@@ -43,16 +46,38 @@ Do not mount host credentials unless the agent genuinely needs them.
 
 ## Requirements
 
-- Docker
-- Docker Compose v2
-- Bash 4.4 or newer
+Runtime requirements:
+
+- Docker configured for Linux containers, including VM-backed Docker on macOS;
+- Docker Compose v2;
+- Bash 4.4 or newer;
+- GNU-compatible `realpath -m` and `sort -V` behavior. Linux coreutils normally
+  provides both. On macOS, install GNU coreutils and put its `gnubin` directory
+  before the system utilities on `PATH`.
+
+Image build requirements:
+
+- Docker Buildx with `buildx build` and `buildx imagetools inspect --format`;
+- either `curl` or `npm` when the build helper must resolve the newest Codex npm
+  version automatically or decide whether a legacy `latest` alias is eligible
+  for migration.
+
+Publishing additionally requires registry credentials with push access. A
+single Linux host building non-native architectures through `--release` needs
+QEMU binfmt support. Separate native amd64 and arm64 builders do not need QEMU.
+
+For `myCodex pull`, immutable remote tag discovery uses the first available of
+`regctl`, `crane`, or `skopeo` with `jq`. Without one of those combinations, it
+falls back to the current Codex npm version using `curl` or `npm`, followed by
+Docker manifest verification of the corresponding moving version tag.
 
 The launcher uses the first `bash` found through `PATH`. On macOS, the system
-Bash is too old; install a current one with Homebrew and put it before `/bin`:
+Bash is too old; install current Bash and GNU coreutils with Homebrew and put
+both before the system tools:
 
 ```bash
-brew install bash
-export PATH="$(brew --prefix)/bin:$PATH"
+brew install bash coreutils
+export PATH="$(brew --prefix)/bin:$(brew --prefix coreutils)/libexec/gnubin:$PATH"
 ```
 
 Changing the login shell alone does not change what `#!/usr/bin/env bash`
@@ -65,7 +90,7 @@ guidance.
 Clone the repository:
 
 ```bash
-git clone https://github.com/<owner>/<repo>.git myCodex
+git clone https://github.com/emsi/myCodex.git
 cd myCodex
 ```
 
@@ -98,6 +123,39 @@ Start or attach to the agent workstation for the current directory:
 
 ```bash
 myCodex
+```
+
+### Run a Specific Image Release
+
+Set `MYCODEX_IMAGE_TAG` to an immutable workstation release tag. The value is
+the tag only, without the image repository or a leading `v`:
+
+```bash
+MYCODEX_IMAGE_TAG=0.146.0-r2 myCodex
+```
+
+That form starts the selected image when the project has no running container.
+When switching an existing project, export the selection, pull it explicitly,
+and let Compose reconcile the container before attaching:
+
+```bash
+export MYCODEX_IMAGE_TAG=0.146.0-r2
+myCodex pull
+myCodex up -d
+myCodex
+```
+
+`myCodex up -d` recreates the container when its selected image differs. A bare
+`myCodex` attaches to an already-running container and does not switch that
+container's image by itself. Use `MYCODEX_IMAGE_NAME` as well when selecting an
+image from a different repository. When running from this checkout rather than
+an installed command, replace `myCodex` with `./bin/myCodex`.
+
+Return to automatic selection of the latest local immutable release with:
+
+```bash
+unset MYCODEX_IMAGE_TAG
+myCodex up -d
 ```
 
 Use an isolated state volume for the current project:
@@ -154,54 +212,87 @@ never creates a volume or starts a container.
 Unknown subcommands are passed through to `docker compose` with the correct
 project name, Compose file, workspace mount, and container environment.
 
-## Launcher Behavior
+## Runtime Model
 
-`bin/myCodex` is a thin wrapper around Docker Compose.
+`bin/myCodex` is the supported entry point and Compose wrapper. It derives a
+project name from the current directory, assembles the host identity and path
+configuration, applies optional volume and Compose overrides, starts the
+workstation when necessary, waits for its tmux session, and attaches.
 
-When invoked from a project directory, it:
+### Identity And Paths
 
-- derives a Compose project name from the current directory name;
-- names the container `<project>-codex`;
-- mounts the current directory at the same absolute path inside the container;
-- uses that same path as the container workdir;
-- mounts persistent state as the runtime user's home directory;
-- creates a runtime user matching the host UID/GID and supplementary groups;
-- initializes Codex and Claude defaults in that persistent home on first run;
-- appends any `-f` / `--compose-file` override files after the built-in Compose
-  file;
-- starts the `codex` service detached and reports startup progress until tmux is
-  ready;
-- resolves the runtime image to a local immutable semver tag unless
-  `MYCODEX_IMAGE_TAG` is set;
-- attaches to the configured tmux session.
+The wrapper passes the caller's numeric UID/GID, username, primary and
+supplementary groups, home path, and current directory into Compose. The image
+starts as root only long enough to prepare the account, sudo policy, state, and
+tmux session. Agent shells then run as the matching host user through `gosu`.
 
-Run containers through `bin/myCodex`. Direct `docker compose up` does not know
-the caller's host UID/GID and fails with an instruction to use the wrapper.
+The current directory is mounted read-write at the same absolute path inside
+the container and becomes its working directory. For example,
+`/home/alice/git/project` remains `/home/alice/git/project`. The selected state
+volume is mounted at the host-style runtime home path. When possible, the
+entrypoint also makes `/workspace` a compatibility symlink to the actual
+workdir; it is not the authoritative mount location.
 
-For ordinary startup, `myCodex` only inspects local Docker image tags. It does
-not query remote registries to find a newer image. `myCodex pull` performs
-remote tag discovery through `regctl`, `crane`, or `skopeo` plus `jq` when
-available, falling back to the latest `@openai/codex` npm version with Docker
-manifest verification.
+On first startup with an empty state volume, the entrypoint initializes the
+small Codex, Claude, sudo, and tmux files needed by the runtime user. If the
+project path is below the host home, it also handles parent directories Docker
+may have created in the empty home volume without changing ownership of the
+workspace bind mount.
 
-The default state volume is shared across projects:
+### State Volumes
 
-```text
-codex_state
-```
+The default `codex_state` volume is shared across projects. Set
+`MYCODEX_STATE_VOLUME_NAME` to select another shared/custom volume. The
+`--private-env` command-line option has higher precedence and selects
+`<project>_codex_state` regardless of that environment variable.
 
-With `--private-env`, the state volume is project-specific:
+`myCodex down -v` removes the state volume selected for that invocation. Review
+the effective volume first with `myCodex info` when using custom or private
+state.
 
-```text
-<project>_codex_state
-```
+### Startup And Tmux
 
-See [Run As Host User](docs/run-as-host-user.md) for the runtime user, path,
-state-volume, startup, and direct-Compose guard details.
+The default command starts Compose detached, reports startup phases until the
+configured tmux session exists, and then attaches. Readiness polling occurs
+only during startup; the service has no steady-state Docker healthcheck.
+`CODEX_BYOBU_SESSION` changes the session name consistently in both the wrapper
+and container. Existing readable `$HOME/.bashrc` files are preserved.
+
+Fresh homes currently fall back to a devcontainer rcfile under
+`/home/vscode`. That path is inaccessible to some non-UID-1000 users; the
+portable fallback is tracked in [issue #6](https://github.com/emsi/myCodex/issues/6).
+
+### Image Resolution
+
+Ordinary startup inspects local Docker tags and selects the latest local
+immutable revision-qualified release unless `MYCODEX_IMAGE_TAG` is set. It does
+not query registries for updates. `myCodex pull` performs the remote discovery
+described in Requirements and pulls the selected image. The explicit image
+workflow is documented under [Run a Specific Image Release](#run-a-specific-image-release).
+
+### Direct Compose Guard
+
+Run containers through `myCodex` or `./bin/myCodex`. Direct `docker compose up`
+does not have the host identity and path values required for ownership-safe
+startup. The Compose file requires a wrapper-provided guard variable, and the
+entrypoint independently validates all required identity values before making
+runtime changes.
 
 ## Image Builds
 
-Build the latest Codex version published on npm:
+Image releases track the bundled Codex version and add a workstation build
+revision. For example, `0.146.0-r2` contains Codex `0.146.0` and is the second
+workstation image release for that Codex version. Revision-qualified tags are
+immutable after publication. Increment the revision whenever the Dockerfile,
+entrypoint, installed tools, or other image inputs change without a Codex
+version change. The terminal `-r<number>` suffix is reserved for this image
+revision; pass the upstream Codex version and image revision separately.
+
+The unqualified Codex-version tag (`0.146.0`) and `latest` are moving
+convenience aliases. Runtime discovery prefers immutable revision-qualified
+tags when registry tag listing is available.
+
+Build revision 1 for the latest Codex version published on npm:
 
 ```bash
 ./bin/build-codex-image.sh
@@ -210,74 +301,132 @@ Build the latest Codex version published on npm:
 Build a specific Codex version:
 
 ```bash
-./bin/build-codex-image.sh --version 0.30.1
+./bin/build-codex-image.sh --version 0.146.0 --revision 1
 ```
 
-Refresh tags after Dockerfile or build-context changes, while still using the
-normal Docker build cache:
+During local development, rebuild the same unpublished revision with the normal
+Docker build cache:
 
 ```bash
-./bin/build-codex-image.sh --version 0.30.1 --refresh-tags
+./bin/build-codex-image.sh --version 0.146.0 --revision 2 --refresh-tags
 ```
+
+`--refresh-tags` only replaces local tags. A revision-qualified registry tag is
+never overwritten; increment `--revision` to publish changed content.
 
 Build both release architectures and publish manifest tags:
 
 ```bash
-./bin/build-codex-image.sh --release --push
+./bin/build-codex-image.sh --version 0.146.0 --revision 2 --release --push
 ```
 
-For native-host publishing, push one architecture from each host, then assemble
-the manifest tags after both arch tags exist:
+For native-host publishing, use the same Codex version, image revision, and
+`RELEASE_ARCHS` on each builder:
 
 ```bash
-ARCHS=amd64 ./bin/build-codex-image.sh --push
-ARCHS=arm64 ./bin/build-codex-image.sh --push
-./bin/build-codex-image.sh --release --manifest
+ARCHS=amd64 ./bin/build-codex-image.sh --version 0.146.0 --revision 2 --push
+ARCHS=arm64 ./bin/build-codex-image.sh --version 0.146.0 --revision 2 --push
 ```
+
+The builders may run in either order. The first push publishes its immutable
+architecture tag and reports which architectures are pending. The push that
+finds the complete `RELEASE_ARCHS` set creates the immutable multi-platform
+manifest and evaluates its moving aliases. A retry that finds its immutable
+architecture tag already in the registry does not pull it and does not create
+local `<version>-r<revision>`, `<version>`, or `latest` aliases.
+
+Moving aliases are monotonic. Before changing `<version>` or `latest`, the
+publisher reads the Codex version and image revision labels embedded in every
+platform image. An older Codex version or lower revision cannot replace a newer
+alias. This also protects `latest` when an architecture for an older partial
+release arrives after a newer release has completed. The older immutable
+manifest and its version-specific alias may still be published.
+
+Legacy aliases without release labels are migrated once. A version-specific
+alias is safe because its name fixes the Codex version; legacy `latest` is
+migrated automatically only when the candidate matches npm's current `latest`
+Codex version.
+
+Normal `--push` retries leave all aliases unchanged when the immutable release
+manifest already exists. If both architecture tags were pushed without
+finalization, or an alias update failed after the immutable manifest was
+created, run:
+
+```bash
+./bin/build-codex-image.sh --version 0.146.0 --revision 2 --manifest
+```
+
+`--manifest` is the explicit finalization and recovery operation. It rechecks
+the moving `<version>` alias and, unless `PUBLISH_LATEST=false`, `latest`, even
+when the immutable manifest already exists. It does not bypass monotonic
+protection.
+
+The `Publish Codex Image` GitHub workflow uses the same model. Automatic Codex
+release events publish revision 1 by default. A manual dispatch can select an
+existing Codex version and a higher image revision for workstation-only fixes.
 
 The helper builds arch-specific staging tags and publishes manifest tags:
 
-- `ghcr.io/infrasecture/harness-workstation:<codex-version>-amd64`
-- `ghcr.io/infrasecture/harness-workstation:<codex-version>-arm64`
-- `ghcr.io/infrasecture/harness-workstation:<codex-version>`
-- `ghcr.io/infrasecture/harness-workstation:latest`
+- `ghcr.io/infrasecture/harness-workstation:<codex-version>-r<revision>-amd64`
+- `ghcr.io/infrasecture/harness-workstation:<codex-version>-r<revision>-arm64`
+- `ghcr.io/infrasecture/harness-workstation:<codex-version>-r<revision>` (immutable)
+- `ghcr.io/infrasecture/harness-workstation:<codex-version>` (moving alias)
+- `ghcr.io/infrasecture/harness-workstation:latest` (moving alias)
 
 Local builds also tag the native image as
-`ghcr.io/infrasecture/harness-workstation:<codex-version>` so `myCodex` can run
-the newly built version without a registry pull.
+`<codex-version>-r<revision>`, `<codex-version>`, and `latest` so `myCodex` can
+run the newly built version without a registry pull.
 
 ## Configuration
 
-Environment variables:
+### Launcher Settings
 
 | Variable | Default | Description |
 | --- | --- | --- |
 | `CODEX_SERVICE` | `codex` | Compose service used for `attach` and `exec`. |
 | `CODEX_BYOBU_SESSION` | `codex` | tmux session name inside the container. |
-| `CODEX_CONTAINER_NAME` | `codex-dev` | Explicit container name when running Compose directly. |
-| `CODEX_VERSION` | `latest` | Codex npm version used during image build. |
-| `CODEX_AUTO_ATTACH` | `0` | Attach automatically during interactive container startup. |
+| `CODEX_CONTAINER_NAME` | `<project>-codex` | Explicit container name used by the wrapper and Compose. |
+| `CODEX_AUTO_ATTACH` | `0` | Set to `1` to let the entrypoint attach when container stdin/stdout are interactive. The wrapper normally attaches from the host after readiness. |
 | `MYCODEX_WAIT_TIMEOUT_SECONDS` | `30` | Startup readiness timeout used by `myCodex`. |
+| `MYCODEX_STARTUP_PROGRESS_INTERVAL_SECONDS` | `2` | Maximum seconds between repeated startup progress messages. |
 | `MYCODEX_COMPOSE` | `docker compose` | Orchestrator command invoked for all Compose operations. Override to wrap Compose without forking `myCodex`, e.g. `vaka --vaka-file=/path/vaka.yaml compose` to enforce an egress policy. Word-split into argv, so paths in it must not contain spaces. |
-| `MYCODEX_LAUNCHED_BY_WRAPPER` | set by `myCodex` | Compose startup guard for wrapper-provided host identity. |
-| `MYCODEX_STATE_VOLUME_NAME` | `codex_state` | Docker volume mounted as the runtime user's home. |
+| `MYCODEX_STATE_VOLUME_NAME` | `codex_state` | Shared/custom Docker volume mounted as the runtime home. `--private-env` takes precedence and uses `<project>_codex_state`. |
 | `MYCODEX_IMAGE_NAME` | `ghcr.io/infrasecture/harness-workstation` | Image name used by build and runtime helpers. |
-| `MYCODEX_IMAGE_TAG` | latest local semver | Runtime image tag. Set to `latest` to opt into mutable-tag behavior. |
-| `MYCODEX_CODEX_NPM_PACKAGE` | `@openai/codex` | npm package used for latest-version discovery. |
-| `ARCHS` | native arch | Image architectures built by `build-codex-image.sh`; `--release` defaults to `amd64 arm64`. |
-| `PUBLISH_LATEST` | `true` | Whether `build-codex-image.sh --push` or `--manifest` updates the `latest` manifest tag. |
-| `MYCODEX_HOST_UID` / `MYCODEX_HOST_GID` | set by `myCodex` | Runtime numeric user and group identity. |
-| `MYCODEX_HOST_USER` / `MYCODEX_HOST_GROUP` | set by `myCodex` | Runtime passwd/group names. |
-| `MYCODEX_HOST_GROUPS` | set by `myCodex` | Supplementary group specs passed into the container. |
+| `MYCODEX_IMAGE_TAG` | latest local revision-qualified release | Runtime image tag. Legacy unqualified SemVer tags remain a discovery fallback; set `latest` explicitly to opt into mutable-tag behavior. |
 | `MYCODEX_CONTAINER_HOME` | host `$HOME` via `myCodex` | Runtime home path mounted from the persistent state volume. |
 | `MYCODEX_WORKDIR` | current directory via `myCodex` | Container workdir and workspace bind target. |
-| `WORKSPACE_DIR` | current directory via `myCodex` | Host path mounted at `MYCODEX_WORKDIR`. |
 
-Build arguments:
+### Image Build And Publication Settings
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `CODEX_VERSION` | `latest` | Codex npm version used by Compose builds. `build-codex-image.sh` instead resolves the newest version or accepts `--version`. |
+| `MYCODEX_IMAGE_REVISION` | `1` | Default workstation image revision used by `build-codex-image.sh`; overridden by `--revision`. |
+| `MYCODEX_CODEX_NPM_PACKAGE` | `@openai/codex` | npm package used for latest-version discovery. |
+| `ARCHS` | native arch | Architectures built by `build-codex-image.sh`; `--release` defaults to `RELEASE_ARCHS`. |
+| `RELEASE_ARCHS` | `amd64 arm64` | Complete architecture set required before publishing an immutable release manifest. |
+| `PUBLISH_LATEST` | `true` | Whether eligible `--push`/`--manifest` promotions include `latest`. This never bypasses monotonic protection. |
+
+### Wrapper-Provided Compose Values
+
+The wrapper owns these values; users normally should not set them directly:
+
+| Variable | Description |
+| --- | --- |
+| `MYCODEX_LAUNCHED_BY_WRAPPER` | Compose startup guard proving that host identity was assembled by `myCodex`. |
+| `MYCODEX_HOST_UID` / `MYCODEX_HOST_GID` | Runtime numeric user and primary group identity. |
+| `MYCODEX_HOST_USER` / `MYCODEX_HOST_GROUP` | Runtime account and primary group names. |
+| `MYCODEX_HOST_GROUPS` | Supplementary group IDs and names. |
+| `WORKSPACE_DIR` | Host current directory mounted at `MYCODEX_WORKDIR`. |
+| `MYCODEX_CODEX_HOME` | Container Codex state path derived from the runtime home. |
+| `MYCODEX_ATTACH_HINT` | Launcher path shown by direct-Compose guard errors. |
+
+### Dockerfile Build Arguments
 
 | Argument | Default | Description |
 | --- | --- | --- |
 | `CODEX_VERSION` | `latest` | Version of `@openai/codex` to install. |
+| `MYCODEX_IMAGE_REVISION` | `1` | Workstation image revision recorded in OCI image metadata. |
 | `INSTALL_CLAUDE_CODE` | `1` | Install Claude Code. |
 | `INSTALL_GEMINI_CLI` | `1` | Install Gemini CLI. |
 | `INSTALL_OPENCODE` | `1` | Install OpenCode. |
@@ -286,14 +435,21 @@ Build arguments:
 
 ```text
 .
+├── .github
+│   └── workflows
+│       ├── ci.yml
+│       └── publish-codex-image.yml
 ├── Dockerfile
 ├── docker-compose.yaml
 ├── entrypoint.sh
-└── bin
-    ├── myCodex
-    ├── build-codex-image.sh
-    └── lib
-        └── mycodex-image.sh
+├── bin
+│   ├── myCodex
+│   ├── build-codex-image.sh
+│   └── lib
+│       └── mycodex-image.sh
+└── tests
+    ├── image-versioning_test.sh
+    └── launcher-config_test.sh
 ```
 
 - `Dockerfile` builds the agent workstation image.
@@ -304,6 +460,10 @@ Build arguments:
 - `bin/myCodex` is the primary launcher and Compose wrapper.
 - `bin/build-codex-image.sh` builds and tags the workstation image.
 - `bin/lib/mycodex-image.sh` contains shared image tag discovery helpers.
+- `.github/workflows/ci.yml` runs shell and behavioral regression tests.
+- `.github/workflows/publish-codex-image.yml` publishes revisioned multi-platform
+  image releases.
+- `tests/` covers release/version behavior and launcher configuration contracts.
 
 ## Publishing Checklist
 
