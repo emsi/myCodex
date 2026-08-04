@@ -100,6 +100,39 @@ Start or attach to the agent workstation for the current directory:
 myCodex
 ```
 
+### Run a Specific Image Release
+
+Set `MYCODEX_IMAGE_TAG` to an immutable workstation release tag. The value is
+the tag only, without the image repository or a leading `v`:
+
+```bash
+MYCODEX_IMAGE_TAG=0.146.0-r2 myCodex
+```
+
+That form starts the selected image when the project has no running container.
+When switching an existing project, export the selection, pull it explicitly,
+and let Compose reconcile the container before attaching:
+
+```bash
+export MYCODEX_IMAGE_TAG=0.146.0-r2
+myCodex pull
+myCodex up -d
+myCodex
+```
+
+`myCodex up -d` recreates the container when its selected image differs. A bare
+`myCodex` attaches to an already-running container and does not switch that
+container's image by itself. Use `MYCODEX_IMAGE_NAME` as well when selecting an
+image from a different repository. When running from this checkout rather than
+an installed command, replace `myCodex` with `./bin/myCodex`.
+
+Return to automatic selection of the latest local immutable release with:
+
+```bash
+unset MYCODEX_IMAGE_TAG
+myCodex up -d
+```
+
 Use an isolated state volume for the current project:
 
 ```bash
