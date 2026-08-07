@@ -91,8 +91,14 @@ LABEL org.opencontainers.image.version="${CODEX_VERSION}-r${MYCODEX_IMAGE_REVISI
       io.infrasecture.mycodex.codex.version="${CODEX_VERSION}" \
       io.infrasecture.mycodex.image.revision="${MYCODEX_IMAGE_REVISION}"
 
-# Fail fast: prove Codex CLI is installed and runnable
-RUN command -v codex && codex --version
+# Fail fast: prove Codex CLI is installed and runnable, then install the
+# matching Bash completion definition for interactive sessions.
+RUN command -v codex \
+ && codex --version \
+ && mkdir -p /etc/bash_completion.d \
+ && codex completion bash > /etc/bash_completion.d/codex \
+ && test -s /etc/bash_completion.d/codex \
+ && bash -n /etc/bash_completion.d/codex
 
 # Session quickstart banner shown once when tmux session is created.
 RUN mkdir -p /etc/mycodex && tee /etc/mycodex/session-banner.txt >/dev/null <<'EOF'
