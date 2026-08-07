@@ -8,20 +8,21 @@ PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 source "${SCRIPT_DIR}/lib/mycodex-image.sh"
 
 IMAGE_NAME="${MYCODEX_IMAGE_NAME:-${MYCODEX_DEFAULT_IMAGE_NAME}}"
-IMAGE_REVISION="${MYCODEX_IMAGE_REVISION:-1}"
+IMAGE_REVISION="${MYCODEX_IMAGE_REVISION:-auto}"
 PUBLISH_LATEST="${PUBLISH_LATEST:-true}"
 
 usage() {
   cat <<'EOF'
 Usage:
-  build-codex-image.sh [--version <semver>] [--revision <number>] [--refresh-tags|--force]
-  build-codex-image.sh [--version <semver>] [--revision <number>] --release [--push]
-  build-codex-image.sh [--version <semver>] [--revision <number>] --manifest
+  build-codex-image.sh [--version <semver>] [--revision <number|auto>] [--refresh-tags|--force]
+  build-codex-image.sh [--version <semver>] [--revision <number|auto>] --release [--push]
+  build-codex-image.sh [--version <semver>] [--revision <number|auto>] --manifest
 
 Options:
   --version <semver>      Codex npm version to install
-  --revision <number>     Workstation image revision for that Codex version
-                          (default: 1)
+  --revision <number|auto>
+                          Workstation image revision for that Codex version
+                          (default: auto)
   --refresh-tags, --force Rebuild local tags with the normal Docker cache;
                           never overwrites revision-qualified registry tags
   --release               Build the release arch set: amd64 arm64
@@ -34,7 +35,7 @@ Environment:
   RELEASE_ARCHS           Full published arch set assembled into the manifest
                           (default: amd64 arm64)
   MYCODEX_IMAGE_NAME      Image name
-  MYCODEX_IMAGE_REVISION  Default image revision (default: 1)
+  MYCODEX_IMAGE_REVISION  Default image revision (default: auto)
   PUBLISH_LATEST          Whether eligible --push/--manifest promotions include
                           :latest (true/false; monotonic protection always applies)
 
@@ -125,8 +126,21 @@ if [[ -z "${VERSION}" ]]; then
   VERSION="$(mycodex_resolve_latest_codex_version)"
 fi
 mycodex_validate_codex_version "${VERSION}" || exit 2
-mycodex_validate_image_revision "${IMAGE_REVISION}" || exit 2
-RELEASE_TAG="$(mycodex_image_release_tag "${VERSION}" "${IMAGE_REVISION}")"
+if [[ "${IMAGE_REVISION}" != "auto" ]]; then
+  mycodex_validate_image_revision "${IMAGE_REVISION}" || exit 2
+fi
+
+if [[ "${DO_PUSH}" == "true" || "${DO_MANIFEST_ONLY}" == "true" ]]; then
+  mycodex_assert_clean_image_inputs "${PROJECT_ROOT}" || exit 2
+fi
+
+BUILD_INPUT_DIGEST="$(mycodex_build_input_digest "${PROJECT_ROOT}")"
+mycodex_validate_build_input_digest "${BUILD_INPUT_DIGEST}" || exit 2
+
+SOURCE_REVISION="$(mycodex_source_revision "${PROJECT_ROOT}")"
+mycodex_validate_source_revision "${SOURCE_REVISION}" || exit 2
+
+RELEASE_TAG=""
 
 NATIVE_ARCH="$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')"
 HOST_OS="$(uname -s)"
@@ -181,6 +195,19 @@ release_ref() {
   printf '%s:%s\n' "${IMAGE_NAME}" "${RELEASE_TAG}"
 }
 
+arch_ref_for_revision() {
+  local revision="$1"
+  local arch="$2"
+
+  printf '%s:%s-r%s-%s\n' "${IMAGE_NAME}" "${VERSION}" "${revision}" "${arch}"
+}
+
+release_ref_for_revision() {
+  local revision="$1"
+
+  printf '%s:%s-r%s\n' "${IMAGE_NAME}" "${VERSION}" "${revision}"
+}
+
 remote_ref_exists() {
   local status
 
@@ -210,6 +237,7 @@ collect_manifest_sources() {
   for arch in ${RELEASE_ARCHS}; do
     tag="$(arch_tag "${arch}")"
     if remote_ref_exists "${tag}"; then
+      require_matching_release_ref "${tag}" "${IMAGE_REVISION}" || return
       MANIFEST_SOURCES+=("${tag}")
     else
       MISSING_ARCHES+=("${arch}")
@@ -219,26 +247,46 @@ collect_manifest_sources() {
 
 REMOTE_IDENTITY_VERSION=""
 REMOTE_IDENTITY_REVISION=""
+REMOTE_IDENTITY_INPUT_DIGEST=""
 
 remote_release_identity() {
   local ref="$1"
-  local output version revision extra
+  local output single_error manifest_error
+  local version revision input_digest source_revision extra
   local found_identity=false found_legacy=false
 
-  if ! output="$(
+  if output="$(
     docker buildx imagetools inspect "${ref}" --format \
-      '{{range $platform, $image := .Image}}{{printf "%s|%s\n" (index $image.Config.Labels "io.infrasecture.mycodex.codex.version") (index $image.Config.Labels "io.infrasecture.mycodex.image.revision")}}{{end}}' \
+      '{{printf "%s|%s|%s|%s\n" (index .Image.Config.Labels "io.infrasecture.mycodex.codex.version") (index .Image.Config.Labels "io.infrasecture.mycodex.image.revision") (index .Image.Config.Labels "io.infrasecture.mycodex.build.input-digest") (index .Image.Config.Labels "org.opencontainers.image.revision")}}' \
       2>&1
   )"; then
-    echo "ERROR: cannot inspect release identity for ${ref}" >&2
-    printf '%s\n' "${output}" >&2
-    return 2
+    :
+  else
+    single_error="${output}"
+    if output="$(
+      docker buildx imagetools inspect "${ref}" --format \
+        '{{range $platform, $image := .Image}}{{printf "%s|%s|%s|%s\n" (index $image.Config.Labels "io.infrasecture.mycodex.codex.version") (index $image.Config.Labels "io.infrasecture.mycodex.image.revision") (index $image.Config.Labels "io.infrasecture.mycodex.build.input-digest") (index $image.Config.Labels "org.opencontainers.image.revision")}}{{end}}' \
+        2>&1
+    )"; then
+      :
+    else
+      manifest_error="${output}"
+      echo "ERROR: cannot inspect release identity for ${ref}" >&2
+      printf '%s\n' "${single_error}" "${manifest_error}" >&2
+      return 2
+    fi
+  fi
+
+  if [[ -z "${output}" ]]; then
+    return 1
   fi
 
   REMOTE_IDENTITY_VERSION=""
   REMOTE_IDENTITY_REVISION=""
-  while IFS='|' read -r version revision extra; do
-    if [[ -z "${version}" && -z "${revision}" ]]; then
+  REMOTE_IDENTITY_INPUT_DIGEST=""
+  while IFS='|' read -r version revision input_digest source_revision extra; do
+    if [[ -z "${version}" && -z "${revision}" \
+      && -z "${input_digest}" && -z "${source_revision}" ]]; then
       found_legacy=true
       continue
     fi
@@ -248,14 +296,31 @@ remote_release_identity() {
       echo "ERROR: invalid release identity on ${ref}: ${output}" >&2
       return 2
     fi
+    if [[ -n "${input_digest}" ]] \
+      && ! mycodex_validate_build_input_digest "${input_digest}" >/dev/null 2>&1; then
+      echo "ERROR: invalid build-input identity on ${ref}: ${output}" >&2
+      return 2
+    fi
+    if [[ -n "${source_revision}" ]] \
+      && ! mycodex_validate_source_revision "${source_revision}" >/dev/null 2>&1; then
+      echo "ERROR: invalid source revision on ${ref}: ${output}" >&2
+      return 2
+    fi
+    if [[ -n "${input_digest}" && -z "${source_revision}" ]] \
+      || [[ -z "${input_digest}" && -n "${source_revision}" ]]; then
+      echo "ERROR: incomplete build identity on ${ref}: ${output}" >&2
+      return 2
+    fi
     if [[ "${found_identity}" == "true" ]] \
       && { [[ "${version}" != "${REMOTE_IDENTITY_VERSION}" ]] \
-        || [[ "${revision}" != "${REMOTE_IDENTITY_REVISION}" ]]; }; then
+        || [[ "${revision}" != "${REMOTE_IDENTITY_REVISION}" ]] \
+        || [[ "${input_digest}" != "${REMOTE_IDENTITY_INPUT_DIGEST}" ]]; }; then
       echo "ERROR: inconsistent platform release identities on ${ref}: ${output}" >&2
       return 2
     fi
     REMOTE_IDENTITY_VERSION="${version}"
     REMOTE_IDENTITY_REVISION="${revision}"
+    REMOTE_IDENTITY_INPUT_DIGEST="${input_digest}"
     found_identity=true
   done <<<"${output}"
 
@@ -266,6 +331,184 @@ remote_release_identity() {
     echo "ERROR: incomplete platform release metadata on ${ref}: ${output}" >&2
     return 2
   fi
+}
+
+EXISTING_REF_INPUT_STATE=""
+
+classify_existing_release_ref() {
+  local ref="$1"
+  local expected_revision="$2"
+  local status
+
+  EXISTING_REF_INPUT_STATE="occupied"
+  if remote_release_identity "${ref}"; then
+    if [[ "${REMOTE_IDENTITY_VERSION}" != "${VERSION}" \
+      || "${REMOTE_IDENTITY_REVISION}" != "${expected_revision}" ]]; then
+      echo "ERROR: registry reference ${ref} has unexpected release identity " \
+        "${REMOTE_IDENTITY_VERSION}-r${REMOTE_IDENTITY_REVISION}" >&2
+      return 2
+    fi
+    if [[ "${REMOTE_IDENTITY_INPUT_DIGEST}" == "${BUILD_INPUT_DIGEST}" ]]; then
+      EXISTING_REF_INPUT_STATE="matching"
+    fi
+    return 0
+  else
+    status=$?
+  fi
+
+  if [[ "${status}" -eq 1 ]]; then
+    return 0
+  fi
+  return "${status}"
+}
+
+require_matching_release_ref() {
+  local ref="$1"
+  local expected_revision="$2"
+
+  classify_existing_release_ref "${ref}" "${expected_revision}" || return
+  if [[ "${EXISTING_REF_INPUT_STATE}" != "matching" ]]; then
+    echo "ERROR: immutable registry reference ${ref} belongs to different or legacy image inputs" >&2
+    echo "Expected build-input digest: ${BUILD_INPUT_DIGEST}" >&2
+    echo "Choose another revision; the existing reference will not be overwritten." >&2
+    return 1
+  fi
+}
+
+LOCAL_IDENTITY_VERSION=""
+LOCAL_IDENTITY_REVISION=""
+LOCAL_IDENTITY_INPUT_DIGEST=""
+
+local_release_identity() {
+  local ref="$1"
+  local output version revision input_digest source_revision extra
+
+  if ! output="$(
+    docker image inspect --format \
+      '{{printf "%s|%s|%s|%s" (index .Config.Labels "io.infrasecture.mycodex.codex.version") (index .Config.Labels "io.infrasecture.mycodex.image.revision") (index .Config.Labels "io.infrasecture.mycodex.build.input-digest") (index .Config.Labels "org.opencontainers.image.revision")}}' \
+      "${ref}" 2>&1
+  )"; then
+    echo "ERROR: cannot inspect local image identity for ${ref}" >&2
+    printf '%s\n' "${output}" >&2
+    return 2
+  fi
+
+  IFS='|' read -r version revision input_digest source_revision extra <<<"${output}"
+  if [[ -n "${extra:-}" ]] \
+    || ! mycodex_validate_codex_version "${version}" >/dev/null 2>&1 \
+    || ! mycodex_validate_image_revision "${revision}" >/dev/null 2>&1 \
+    || ! mycodex_validate_build_input_digest "${input_digest}" >/dev/null 2>&1 \
+    || ! mycodex_validate_source_revision "${source_revision}" >/dev/null 2>&1; then
+    return 1
+  fi
+
+  LOCAL_IDENTITY_VERSION="${version}"
+  LOCAL_IDENTITY_REVISION="${revision}"
+  LOCAL_IDENTITY_INPUT_DIGEST="${input_digest}"
+}
+
+local_ref_matches_build_inputs() {
+  local ref="$1"
+  local expected_revision="$2"
+  local status
+
+  if local_release_identity "${ref}"; then
+    [[ "${LOCAL_IDENTITY_VERSION}" == "${VERSION}" \
+      && "${LOCAL_IDENTITY_REVISION}" == "${expected_revision}" \
+      && "${LOCAL_IDENTITY_INPUT_DIGEST}" == "${BUILD_INPUT_DIGEST}" ]]
+    return
+  else
+    status=$?
+  fi
+
+  return "${status}"
+}
+
+CANDIDATE_REVISION_STATE=""
+
+classify_candidate_revision() {
+  local revision="$1"
+  local ref arch
+  local found=false matching=false occupied=false
+  local -a refs
+
+  refs=("$(release_ref_for_revision "${revision}")")
+  for arch in ${RELEASE_ARCHS}; do
+    refs+=("$(arch_ref_for_revision "${revision}" "${arch}")")
+  done
+
+  for ref in "${refs[@]}"; do
+    if ! remote_ref_exists "${ref}"; then
+      continue
+    fi
+    found=true
+    classify_existing_release_ref "${ref}" "${revision}" || return
+    if [[ "${EXISTING_REF_INPUT_STATE}" == "matching" ]]; then
+      matching=true
+    else
+      occupied=true
+    fi
+  done
+
+  if [[ "${matching}" == "true" && "${occupied}" == "true" ]]; then
+    echo "ERROR: image revision ${VERSION}-r${revision} contains conflicting build-input identities" >&2
+    echo "Do not assemble this revision; synchronize the builders and select a higher revision." >&2
+    return 2
+  elif [[ "${matching}" == "true" ]]; then
+    CANDIDATE_REVISION_STATE="matching"
+  elif [[ "${found}" == "true" ]]; then
+    CANDIDATE_REVISION_STATE="occupied"
+  else
+    CANDIDATE_REVISION_STATE="empty"
+  fi
+}
+
+resolve_automatic_image_revision() {
+  local alias_ref="${IMAGE_NAME}:${VERSION}"
+  local candidate=1 attempts=0 status
+
+  if remote_ref_exists "${alias_ref}"; then
+    if remote_release_identity "${alias_ref}"; then
+      if [[ "${REMOTE_IDENTITY_VERSION}" != "${VERSION}" ]]; then
+        echo "ERROR: version alias ${alias_ref} identifies Codex ${REMOTE_IDENTITY_VERSION}" >&2
+        return 2
+      fi
+      if [[ "${REMOTE_IDENTITY_INPUT_DIGEST}" == "${BUILD_INPUT_DIGEST}" ]]; then
+        candidate="${REMOTE_IDENTITY_REVISION}"
+      else
+        candidate="$((10#${REMOTE_IDENTITY_REVISION} + 1))"
+      fi
+    else
+      status=$?
+      if [[ "${status}" -ne 1 ]]; then
+        return "${status}"
+      fi
+    fi
+  fi
+
+  while [[ "${attempts}" -lt 100 ]]; do
+    classify_candidate_revision "${candidate}" || return
+    case "${CANDIDATE_REVISION_STATE}" in
+      matching)
+        IMAGE_REVISION="${candidate}"
+        echo "==> Reusing image revision ${IMAGE_REVISION} for matching image inputs"
+        return 0
+        ;;
+      empty)
+        IMAGE_REVISION="${candidate}"
+        echo "==> Selected image revision ${IMAGE_REVISION} for new image inputs"
+        return 0
+        ;;
+      occupied)
+        echo "==> Image revision ${candidate} is occupied by different or legacy inputs; checking the next revision"
+        candidate="$((10#${candidate} + 1))"
+        ;;
+    esac
+    attempts=$((attempts + 1))
+  done
+
+  echo "ERROR: could not find an available image revision after ${attempts} attempts" >&2
+  return 2
 }
 
 alias_promotion_allowed() {
@@ -373,6 +616,7 @@ finalize_release_manifest() {
 
   immutable_ref="$(release_ref)"
   if remote_ref_exists "${immutable_ref}"; then
+    require_matching_release_ref "${immutable_ref}" "${IMAGE_REVISION}" || return
     FINALIZATION_STATE="existing"
     echo "==> Keeping existing immutable manifest ${immutable_ref}"
     if [[ "${promote_existing}" != "true" ]]; then
@@ -388,6 +632,19 @@ finalize_release_manifest() {
   fi
   publish_moving_aliases
 }
+
+if [[ "${IMAGE_REVISION}" == "auto" ]]; then
+  resolve_automatic_image_revision || exit $?
+fi
+mycodex_validate_image_revision "${IMAGE_REVISION}" || exit 2
+RELEASE_TAG="$(mycodex_image_release_tag "${VERSION}" "${IMAGE_REVISION}")"
+
+echo "==> Image build identity"
+echo "    Codex version: ${VERSION}"
+echo "    Image revision: ${IMAGE_REVISION}"
+echo "    Build inputs: ${BUILD_INPUT_DIGEST}"
+echo "    Source revision: ${SOURCE_REVISION}"
+echo ""
 
 if [[ "${DO_MANIFEST_ONLY}" == "true" ]]; then
   echo "==> Finalizing ${IMAGE_NAME}:${RELEASE_TAG} (scanning ${RELEASE_ARCHS})"
@@ -415,6 +672,7 @@ if [[ "${DO_PUSH}" == "true" ]]; then
   for ARCH in ${ARCHS}; do
     tag="$(arch_tag "${ARCH}")"
     if remote_ref_exists "${tag}"; then
+      require_matching_release_ref "${tag}" "${IMAGE_REVISION}" || exit $?
       REMOTE_ARCH_TAGS["${ARCH}"]=true
     fi
   done
@@ -422,10 +680,11 @@ fi
 
 for ARCH in ${ARCHS}; do
   tag="$(arch_tag "${ARCH}")"
+  reuse_local=false
 
   if [[ "${REMOTE_ARCH_TAGS[${ARCH}]:-false}" == "true" ]]; then
     echo "==> Skipping ${tag} (immutable registry tag already exists)"
-    echo "    Increment --revision to publish changed workstation content."
+    echo "    Registry identity matches the current image inputs; nothing was built or pushed."
     echo "    No local image or local aliases were created."
     echo ""
     continue
@@ -433,9 +692,20 @@ for ARCH in ${ARCHS}; do
 
   if [[ "${REFRESH_TAGS}" == "false" ]] \
     && docker image inspect "${tag}" >/dev/null 2>&1; then
-    echo "==> Skipping ${tag} (already present locally)"
-    echo "    Use --refresh-tags to rebuild with cache."
-  else
+    if local_ref_matches_build_inputs "${tag}" "${IMAGE_REVISION}"; then
+      reuse_local=true
+      echo "==> Skipping ${tag} (matching image inputs already present locally)"
+      echo "    Use --refresh-tags to rebuild with cache."
+    else
+      status=$?
+      if [[ "${status}" -ne 1 ]]; then
+        exit "${status}"
+      fi
+      echo "==> Rebuilding ${tag} (local tag has different or legacy image inputs)"
+    fi
+  fi
+
+  if [[ "${reuse_local}" != "true" ]]; then
     require_qemu_for_arch "${ARCH}"
     echo "==> Building ${tag} (platform linux/${ARCH})"
     docker buildx build \
@@ -443,6 +713,8 @@ for ARCH in ${ARCHS}; do
       --load \
       --build-arg "CODEX_VERSION=${VERSION}" \
       --build-arg "MYCODEX_IMAGE_REVISION=${IMAGE_REVISION}" \
+      --build-arg "MYCODEX_SOURCE_REVISION=${SOURCE_REVISION}" \
+      --build-arg "MYCODEX_BUILD_INPUT_DIGEST=${BUILD_INPUT_DIGEST}" \
       --tag "${tag}" \
       "${PROJECT_ROOT}"
   fi
@@ -466,6 +738,12 @@ if [[ "${DO_PUSH}" == "true" ]]; then
     tag="$(arch_tag "${ARCH}")"
     if [[ "${REMOTE_ARCH_TAGS[${ARCH}]:-false}" == "true" ]]; then
       echo "    ${tag}  EXISTS (kept immutable)"
+      continue
+    fi
+    if remote_ref_exists "${tag}"; then
+      require_matching_release_ref "${tag}" "${IMAGE_REVISION}" || exit $?
+      REMOTE_ARCH_TAGS["${ARCH}"]=true
+      echo "    ${tag}  EXISTS (published concurrently; kept immutable)"
       continue
     fi
     printf '    %s  ' "${tag}"
