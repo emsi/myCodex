@@ -8,9 +8,9 @@ on:
         required: false
         type: string
       image_revision:
-        description: Workstation image revision for this Codex version
-        required: true
-        default: "1"
+        description: Workstation image revision or "auto"
+        required: false
+        default: auto
         type: string
   repository_dispatch:
     types: [codex_version_released]
@@ -27,6 +27,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -51,7 +53,7 @@ jobs:
         shell: bash
         env:
           REQUESTED_CODEX_VERSION: ${{ inputs.codex_version || github.event.client_payload.codex_version || '' }}
-          REQUESTED_IMAGE_REVISION: ${{ inputs.image_revision || github.event.client_payload.image_revision || '1' }}
+          REQUESTED_IMAGE_REVISION: ${{ inputs.image_revision || github.event.client_payload.image_revision || 'auto' }}
         run: |
           set -euo pipefail
           source bin/lib/mycodex-image.sh
@@ -61,41 +63,18 @@ jobs:
           fi
           REVISION="${REQUESTED_IMAGE_REVISION}"
           mycodex_validate_codex_version "${VERSION}"
-          mycodex_validate_image_revision "${REVISION}"
-          RELEASE_TAG="$(mycodex_image_release_tag "${VERSION}" "${REVISION}")"
+          if [[ "${REVISION}" != "auto" ]]; then
+            mycodex_validate_image_revision "${REVISION}"
+          fi
           IMAGE="${MYCODEX_IMAGE_NAME}"
           echo "codex_version=${VERSION}" >> "${GITHUB_OUTPUT}"
           echo "image_revision=${REVISION}" >> "${GITHUB_OUTPUT}"
-          echo "release_tag=${RELEASE_TAG}" >> "${GITHUB_OUTPUT}"
           echo "image=${IMAGE}" >> "${GITHUB_OUTPUT}"
           echo "Resolved Codex version: ${VERSION}"
-          echo "Workstation image revision: ${REVISION}"
-          echo "Immutable release tag: ${RELEASE_TAG}"
+          echo "Requested workstation image revision: ${REVISION}"
           echo "Target image: ${IMAGE}"
 
-      - name: Check Existing Image Release
-        id: check
-        shell: bash
-        run: |
-          set -euo pipefail
-          source bin/lib/mycodex-image.sh
-          IMAGE="${{ steps.version.outputs.image }}"
-          RELEASE_TAG="${{ steps.version.outputs.release_tag }}"
-          REF="${IMAGE}:${RELEASE_TAG}"
-          if mycodex_registry_ref_exists "${REF}"; then
-            echo "exists=true" >> "${GITHUB_OUTPUT}"
-            echo "Immutable image release already exists: ${REF}"
-          else
-            status=$?
-            if [[ "${status}" -ne 1 ]]; then
-              exit "${status}"
-            fi
-            echo "exists=false" >> "${GITHUB_OUTPUT}"
-            echo "New image release: ${REF}"
-          fi
-
       - name: Build and Push Images
-        if: steps.check.outputs.exists == 'false'
         shell: bash
         run: |
           set -euo pipefail
@@ -110,12 +89,5 @@ jobs:
         run: |
           IMAGE="${{ steps.version.outputs.image }}"
           VERSION="${{ steps.version.outputs.codex_version }}"
-          RELEASE_TAG="${{ steps.version.outputs.release_tag }}"
-          if [[ "${{ steps.check.outputs.exists }}" == "true" ]]; then
-            echo "No publish needed. ${IMAGE}:${RELEASE_TAG} already exists."
-          else
-            echo "Published ${IMAGE}:${RELEASE_TAG}-amd64 and ${IMAGE}:${RELEASE_TAG}-arm64."
-            echo "Published immutable manifest ${IMAGE}:${RELEASE_TAG}."
-            echo "Moving aliases were updated only where monotonic promotion allowed it."
-            echo "See the build output for the status of ${IMAGE}:${VERSION} and ${IMAGE}:latest."
-          fi
+          echo "Publication command completed for ${IMAGE}, Codex ${VERSION}."
+          echo "See the build output for the selected immutable revision and alias status."

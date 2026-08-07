@@ -85,11 +85,15 @@ RUN if [[ "${INSTALL_CLAUDE_CODE}" == "1" ]]; then npm install -g @anthropic-ai/
 # Codex version is declared as late as possible to avoid invalidating base cache.
 ARG CODEX_VERSION=latest
 ARG MYCODEX_IMAGE_REVISION=1
+ARG MYCODEX_SOURCE_REVISION=unknown
+ARG MYCODEX_BUILD_INPUT_DIGEST=unknown
 RUN npm install -g "@openai/codex@${CODEX_VERSION}"
 
 LABEL org.opencontainers.image.version="${CODEX_VERSION}-r${MYCODEX_IMAGE_REVISION}" \
+      org.opencontainers.image.revision="${MYCODEX_SOURCE_REVISION}" \
       io.infrasecture.mycodex.codex.version="${CODEX_VERSION}" \
-      io.infrasecture.mycodex.image.revision="${MYCODEX_IMAGE_REVISION}"
+      io.infrasecture.mycodex.image.revision="${MYCODEX_IMAGE_REVISION}" \
+      io.infrasecture.mycodex.build.input-digest="${MYCODEX_BUILD_INPUT_DIGEST}"
 
 # Fail fast: prove Codex CLI is installed and runnable, then install the
 # matching Bash completion definition for interactive sessions.
