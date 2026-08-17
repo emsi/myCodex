@@ -6,6 +6,9 @@ PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 # shellcheck source=bin/lib/mycodex-image.sh
 source "${PROJECT_ROOT}/bin/lib/mycodex-image.sh"
 
+TEST_BUILD_INPUT_DIGEST="$(mycodex_build_input_digest "${PROJECT_ROOT}")"
+TEST_SOURCE_REVISION="$(mycodex_source_revision "${PROJECT_ROOT}")"
+
 fail() {
   printf 'FAIL: %s\n' "$*" >&2
   exit 1
@@ -111,6 +114,36 @@ assert_eq \
 
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/mycodex-image-versioning.XXXXXX")"
 trap 'rm -rf -- "${tmp_dir}"' EXIT
+
+identity_repo="${tmp_dir}/identity-repo"
+mkdir -p "${identity_repo}"
+cp \
+  "${PROJECT_ROOT}/${MYCODEX_IMAGE_INPUTS_FILE}" \
+  "${PROJECT_ROOT}/Dockerfile" \
+  "${PROJECT_ROOT}/entrypoint.sh" \
+  "${identity_repo}/"
+git -C "${identity_repo}" init -q
+git -C "${identity_repo}" add .
+git -C "${identity_repo}" \
+  -c user.name=myCodex-test -c user.email=mycodex-test@example.invalid \
+  commit -qm "test image inputs"
+baseline_input_digest="$(mycodex_build_input_digest "${identity_repo}")"
+mycodex_validate_build_input_digest "${baseline_input_digest}"
+mycodex_assert_clean_image_inputs "${identity_repo}"
+printf '\n# simulated image change\n' >>"${identity_repo}/entrypoint.sh"
+changed_test_digest="$(mycodex_build_input_digest "${identity_repo}")"
+if [[ "${changed_test_digest}" == "${baseline_input_digest}" ]]; then
+  fail "image-input digest ignored an entrypoint change"
+fi
+if mycodex_assert_clean_image_inputs "${identity_repo}" >/dev/null 2>&1; then
+  fail "dirty image inputs were accepted for publication"
+fi
+git -C "${identity_repo}" checkout -q -- entrypoint.sh
+printf 'documentation only\n' >"${identity_repo}/README.md"
+if [[ "$(mycodex_build_input_digest "${identity_repo}")" != "${baseline_input_digest}" ]]; then
+  fail "unrelated documentation changed the image-input digest"
+fi
+
 export FAKE_DOCKER_LOG="${tmp_dir}/docker.log"
 export FAKE_LOCAL_REFS="${tmp_dir}/local-refs"
 export FAKE_REMOTE_REFS="${tmp_dir}/remote-refs"
@@ -135,11 +168,14 @@ set_identity() {
   local ref="$2"
   local version="$3"
   local revision="$4"
+  local input_digest="$5"
+  local source_revision="$6"
   local filtered="${file}.filtered"
 
   awk -F '|' -v ref="${ref}" '$1 != ref' "${file}" >"${filtered}"
   mv -- "${filtered}" "${file}"
-  printf '%s|%s|%s\n' "${ref}" "${version}" "${revision}" >>"${file}"
+  printf '%s|%s|%s|%s|%s\n' \
+    "${ref}" "${version}" "${revision}" "${input_digest}" "${source_revision}" >>"${file}"
 }
 
 identity_for() {
@@ -149,17 +185,33 @@ identity_for() {
   awk -F '|' -v ref="${ref}" '$1 == ref { print $2, $3; exit }' "${file}"
 }
 
+metadata_for() {
+  local file="$1"
+  local ref="$2"
+
+  awk -F '|' -v ref="${ref}" '$1 == ref { print $2, $3, $4, $5; exit }' "${file}"
+}
+
+input_digest_for() {
+  local file="$1"
+  local ref="$2"
+
+  awk -F '|' -v ref="${ref}" '$1 == ref { print $4; exit }' "${file}"
+}
+
 copy_identity() {
   local source_file="$1"
   local source_ref="$2"
   local target_file="$3"
   local target_ref="$4"
-  local identity version revision
+  local metadata version revision input_digest source_revision
 
-  identity="$(identity_for "${source_file}" "${source_ref}")"
-  [[ -n "${identity}" ]] || return 0
-  read -r version revision <<<"${identity}"
-  set_identity "${target_file}" "${target_ref}" "${version}" "${revision}"
+  metadata="$(metadata_for "${source_file}" "${source_ref}")"
+  [[ -n "${metadata}" ]] || return 0
+  read -r version revision input_digest source_revision <<<"${metadata}"
+  set_identity \
+    "${target_file}" "${target_ref}" \
+    "${version}" "${revision}" "${input_digest}" "${source_revision}"
 }
 
 docker() {
@@ -172,11 +224,12 @@ docker() {
     fi
     if grep -Fxq -- "$4" "${FAKE_REMOTE_REFS}"; then
       if [[ " $* " == *" --format "* ]]; then
-        local identity version revision
-        identity="$(identity_for "${FAKE_REMOTE_IDENTITIES}" "$4")"
-        if [[ -n "${identity}" ]]; then
-          read -r version revision <<<"${identity}"
-          printf '%s|%s\n' "${version}" "${revision}"
+        local metadata version revision input_digest source_revision
+        metadata="$(metadata_for "${FAKE_REMOTE_IDENTITIES}" "$4")"
+        if [[ -n "${metadata}" ]]; then
+          read -r version revision input_digest source_revision <<<"${metadata}"
+          printf '%s|%s|%s|%s\n' \
+            "${version}" "${revision}" "${input_digest}" "${source_revision}"
         fi
       fi
       return 0
@@ -186,13 +239,23 @@ docker() {
   fi
 
   if [[ "$1 $2" == "image inspect" ]]; then
-    grep -Fxq -- "$3" "${FAKE_LOCAL_REFS}"
+    local ref="${!#}"
+    grep -Fxq -- "${ref}" "${FAKE_LOCAL_REFS}" || return 1
+    if [[ " $* " == *" --format "* ]]; then
+      local metadata version revision input_digest source_revision
+      metadata="$(metadata_for "${FAKE_LOCAL_IDENTITIES}" "${ref}")"
+      if [[ -n "${metadata}" ]]; then
+        read -r version revision input_digest source_revision <<<"${metadata}"
+        printf '%s|%s|%s|%s\n' \
+          "${version}" "${revision}" "${input_digest}" "${source_revision}"
+      fi
+    fi
     return
   fi
 
   if [[ "$1 $2" == "buildx build" ]]; then
     local previous=""
-    local arg tag="" version="" revision=""
+    local arg tag="" version="" revision="" input_digest="" source_revision=""
     for arg in "$@"; do
       if [[ "${previous}" == "--tag" ]]; then
         tag="${arg}"
@@ -201,12 +264,23 @@ docker() {
         case "${arg}" in
           CODEX_VERSION=*) version="${arg#CODEX_VERSION=}" ;;
           MYCODEX_IMAGE_REVISION=*) revision="${arg#MYCODEX_IMAGE_REVISION=}" ;;
+          MYCODEX_BUILD_INPUT_DIGEST=*) input_digest="${arg#MYCODEX_BUILD_INPUT_DIGEST=}" ;;
+          MYCODEX_SOURCE_REVISION=*) source_revision="${arg#MYCODEX_SOURCE_REVISION=}" ;;
         esac
       fi
       previous="${arg}"
     done
-    if [[ -n "${tag}" && -n "${version}" && -n "${revision}" ]]; then
-      set_identity "${FAKE_LOCAL_IDENTITIES}" "${tag}" "${version}" "${revision}"
+    if [[ -n "${tag}" && -n "${version}" && -n "${revision}" \
+      && -n "${input_digest}" && -n "${source_revision}" ]]; then
+      set_identity \
+        "${FAKE_LOCAL_IDENTITIES}" "${tag}" \
+        "${version}" "${revision}" "${input_digest}" "${source_revision}"
+      if [[ "${FAKE_CONCURRENT_REF:-}" == "${tag}" ]]; then
+        record_ref "${FAKE_REMOTE_REFS}" "${tag}"
+        copy_identity \
+          "${FAKE_LOCAL_IDENTITIES}" "${tag}" \
+          "${FAKE_REMOTE_IDENTITIES}" "${tag}"
+      fi
     fi
     return
   fi
@@ -247,7 +321,7 @@ docker() {
 
   fail "unhandled fake docker invocation: $*"
 }
-export -f docker record_ref set_identity identity_for copy_identity fail
+export -f docker record_ref set_identity identity_for metadata_for copy_identity fail
 
 uname() {
   case "$1" in
@@ -305,6 +379,14 @@ run_build() {
     bash "${PROJECT_ROOT}/bin/build-codex-image.sh" "$@" >"${output}" 2>&1
 }
 
+reset_fake_state() {
+  : >"${FAKE_DOCKER_LOG}"
+  : >"${FAKE_LOCAL_REFS}"
+  : >"${FAKE_REMOTE_REFS}"
+  : >"${FAKE_LOCAL_IDENTITIES}"
+  : >"${FAKE_REMOTE_IDENTITIES}"
+}
+
 amd64_output="${tmp_dir}/amd64.out"
 run_build x86_64 amd64 "${amd64_output}" --version 0.146.0 --revision 2 --push
 assert_ref_exists "example.test/workstation:0.146.0-r2-amd64"
@@ -323,7 +405,7 @@ assert_ref_exists "example.test/workstation:latest"
 assert_contains "${FAKE_DOCKER_LOG}" "--tag example.test/workstation:0.146.0-r2 example.test/workstation:0.146.0-r2-amd64 example.test/workstation:0.146.0-r2-arm64"
 assert_contains "${FAKE_DOCKER_LOG}" "--tag example.test/workstation:0.146.0 --tag example.test/workstation:latest example.test/workstation:0.146.0-r2"
 assert_occurrences "${FAKE_DOCKER_LOG}" "buildx imagetools inspect example.test/workstation:0.146.0-r2-amd64" 1
-assert_occurrences "${FAKE_DOCKER_LOG}" "buildx imagetools inspect example.test/workstation:0.146.0-r2-arm64" 2
+assert_occurrences "${FAKE_DOCKER_LOG}" "buildx imagetools inspect example.test/workstation:0.146.0-r2-arm64" 3
 assert_occurrences "${FAKE_DOCKER_LOG}" "buildx imagetools inspect example.test/workstation:0.146.0-r2" 1
 
 : >"${FAKE_DOCKER_LOG}"
@@ -356,6 +438,15 @@ assert_ref_exists "example.test/workstation:0.147.0"
 record_ref "${FAKE_REMOTE_REFS}" "example.test/workstation:0.146.0-r2-amd64"
 record_ref "${FAKE_REMOTE_REFS}" "example.test/workstation:0.146.0-r2-arm64"
 record_ref "${FAKE_REMOTE_REFS}" "example.test/workstation:0.146.0-r2"
+set_identity \
+  "${FAKE_REMOTE_IDENTITIES}" "example.test/workstation:0.146.0-r2-amd64" \
+  0.146.0 2 "${TEST_BUILD_INPUT_DIGEST}" "${TEST_SOURCE_REVISION}"
+set_identity \
+  "${FAKE_REMOTE_IDENTITIES}" "example.test/workstation:0.146.0-r2-arm64" \
+  0.146.0 2 "${TEST_BUILD_INPUT_DIGEST}" "${TEST_SOURCE_REVISION}"
+set_identity \
+  "${FAKE_REMOTE_IDENTITIES}" "example.test/workstation:0.146.0-r2" \
+  0.146.0 2 "${TEST_BUILD_INPUT_DIGEST}" "${TEST_SOURCE_REVISION}"
 : >"${FAKE_DOCKER_LOG}"
 older_retry_output="${tmp_dir}/older-retry.out"
 run_build x86_64 amd64 "${older_retry_output}" --version 0.146.0 --revision 2 --push
@@ -435,6 +526,120 @@ assert_contains "${legacy_migration_output}" "Migrating legacy latest alias exam
 assert_eq "0.151.0 1" \
   "$(identity_for "${FAKE_REMOTE_IDENTITIES}" "example.test/workstation:latest")" \
   "legacy latest migration identity"
+
+reset_fake_state
+auto_amd64_output="${tmp_dir}/auto-amd64.out"
+run_build x86_64 amd64 "${auto_amd64_output}" --version 0.160.0 --push
+assert_contains "${auto_amd64_output}" "Selected image revision 1 for new image inputs"
+assert_ref_exists "example.test/workstation:0.160.0-r1-amd64"
+assert_ref_missing "example.test/workstation:0.160.0-r2-amd64"
+
+: >"${FAKE_DOCKER_LOG}"
+auto_partial_retry_output="${tmp_dir}/auto-partial-retry.out"
+run_build x86_64 amd64 "${auto_partial_retry_output}" --version 0.160.0 --push
+assert_contains "${auto_partial_retry_output}" "Reusing image revision 1 for matching image inputs"
+assert_not_contains "${FAKE_DOCKER_LOG}" "buildx build"
+assert_not_contains "${FAKE_DOCKER_LOG}" "image push"
+assert_not_contains "${FAKE_DOCKER_LOG}" "imagetools create"
+
+auto_arm64_output="${tmp_dir}/auto-arm64.out"
+run_build aarch64 arm64 "${auto_arm64_output}" --version 0.160.0 --push
+assert_contains "${auto_arm64_output}" "Reusing image revision 1 for matching image inputs"
+assert_ref_exists "example.test/workstation:0.160.0-r1"
+assert_ref_exists "example.test/workstation:0.160.0"
+
+: >"${FAKE_DOCKER_LOG}"
+auto_complete_retry_output="${tmp_dir}/auto-complete-retry.out"
+run_build x86_64 amd64 "${auto_complete_retry_output}" --version 0.160.0 --push
+assert_contains "${auto_complete_retry_output}" "Reusing image revision 1 for matching image inputs"
+assert_contains "${auto_complete_retry_output}" "Moving registry aliases were not changed."
+assert_not_contains "${FAKE_DOCKER_LOG}" "buildx build"
+assert_not_contains "${FAKE_DOCKER_LOG}" "image push"
+assert_not_contains "${FAKE_DOCKER_LOG}" "imagetools create"
+assert_ref_missing "example.test/workstation:0.160.0-r2-amd64"
+
+changed_input_digest="sha256:$(printf 'b%.0s' {1..64})"
+for changed_ref in \
+  example.test/workstation:0.160.0-r1-amd64 \
+  example.test/workstation:0.160.0-r1-arm64 \
+  example.test/workstation:0.160.0-r1 \
+  example.test/workstation:0.160.0; do
+  set_identity \
+    "${FAKE_REMOTE_IDENTITIES}" "${changed_ref}" \
+    0.160.0 1 "${changed_input_digest}" "${TEST_SOURCE_REVISION}"
+done
+: >"${FAKE_DOCKER_LOG}"
+changed_amd64_output="${tmp_dir}/changed-amd64.out"
+run_build x86_64 amd64 "${changed_amd64_output}" --version 0.160.0 --push
+assert_contains "${changed_amd64_output}" "Selected image revision 2 for new image inputs"
+assert_ref_exists "example.test/workstation:0.160.0-r2-amd64"
+assert_ref_missing "example.test/workstation:0.160.0-r2"
+
+changed_arm64_output="${tmp_dir}/changed-arm64.out"
+run_build aarch64 arm64 "${changed_arm64_output}" --version 0.160.0 --push
+assert_contains "${changed_arm64_output}" "Reusing image revision 2 for matching image inputs"
+assert_ref_exists "example.test/workstation:0.160.0-r2"
+assert_eq "${TEST_BUILD_INPUT_DIGEST}" \
+  "$(input_digest_for "${FAKE_REMOTE_IDENTITIES}" "example.test/workstation:0.160.0")" \
+  "promoted version alias build-input digest"
+
+reset_fake_state
+record_ref "${FAKE_REMOTE_REFS}" "example.test/workstation:0.161.0"
+set_identity \
+  "${FAKE_REMOTE_IDENTITIES}" "example.test/workstation:0.161.0" \
+  0.161.0 1 "" ""
+legacy_auto_output="${tmp_dir}/legacy-auto.out"
+run_build x86_64 amd64 "${legacy_auto_output}" --version 0.161.0 --push
+assert_contains "${legacy_auto_output}" "Selected image revision 2 for new image inputs"
+assert_ref_exists "example.test/workstation:0.161.0-r2-amd64"
+
+reset_fake_state
+record_ref "${FAKE_REMOTE_REFS}" "example.test/workstation:0.162.0-r1-amd64"
+record_ref "${FAKE_REMOTE_REFS}" "example.test/workstation:0.162.0-r1-arm64"
+set_identity \
+  "${FAKE_REMOTE_IDENTITIES}" "example.test/workstation:0.162.0-r1-amd64" \
+  0.162.0 1 "${TEST_BUILD_INPUT_DIGEST}" "${TEST_SOURCE_REVISION}"
+set_identity \
+  "${FAKE_REMOTE_IDENTITIES}" "example.test/workstation:0.162.0-r1-arm64" \
+  0.162.0 1 "${changed_input_digest}" "${TEST_SOURCE_REVISION}"
+conflicting_auto_output="${tmp_dir}/conflicting-auto.out"
+if run_build x86_64 amd64 "${conflicting_auto_output}" --version 0.162.0 --push; then
+  fail "automatic revision selection accepted conflicting architecture identities"
+fi
+assert_contains "${conflicting_auto_output}" "contains conflicting build-input identities"
+assert_not_contains "${FAKE_DOCKER_LOG}" "imagetools create"
+
+conflicting_manifest_output="${tmp_dir}/conflicting-manifest.out"
+if run_build x86_64 amd64 "${conflicting_manifest_output}" \
+  --version 0.162.0 --revision 1 --manifest; then
+  fail "manifest finalization accepted conflicting architecture identities"
+fi
+assert_contains "${conflicting_manifest_output}" "belongs to different or legacy image inputs"
+assert_ref_missing "example.test/workstation:0.162.0-r1"
+
+reset_fake_state
+export FAKE_CONCURRENT_REF="example.test/workstation:0.163.0-r1-amd64"
+concurrent_output="${tmp_dir}/concurrent.out"
+run_build x86_64 amd64 "${concurrent_output}" --version 0.163.0 --push
+unset FAKE_CONCURRENT_REF
+assert_contains "${concurrent_output}" "published concurrently; kept immutable"
+assert_not_contains "${FAKE_DOCKER_LOG}" "image push"
+assert_ref_exists "example.test/workstation:0.163.0-r1-amd64"
+assert_ref_missing "example.test/workstation:0.163.0-r1"
+
+reset_fake_state
+stale_local_ref="example.test/workstation:0.164.0-r1-amd64"
+record_ref "${FAKE_LOCAL_REFS}" "${stale_local_ref}"
+set_identity \
+  "${FAKE_LOCAL_IDENTITIES}" "${stale_local_ref}" \
+  0.164.0 1 "${changed_input_digest}" "${TEST_SOURCE_REVISION}"
+stale_local_output="${tmp_dir}/stale-local.out"
+run_build x86_64 amd64 "${stale_local_output}" --version 0.164.0 --push
+assert_contains "${stale_local_output}" "local tag has different or legacy image inputs"
+assert_contains "${FAKE_DOCKER_LOG}" "buildx build"
+assert_eq "${TEST_BUILD_INPUT_DIGEST}" \
+  "$(input_digest_for "${FAKE_REMOTE_IDENTITIES}" "${stale_local_ref}")" \
+  "rebuilt local image identity"
 
 missing_output="${tmp_dir}/missing.out"
 if run_build x86_64 amd64 "${missing_output}" --version 0.200.0 --revision 1 --manifest; then

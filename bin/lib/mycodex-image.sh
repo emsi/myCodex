@@ -3,6 +3,9 @@
 # shellcheck disable=SC2034 # Constants are consumed by scripts that source this file.
 MYCODEX_DEFAULT_IMAGE_NAME="ghcr.io/infrasecture/harness-workstation"
 MYCODEX_DEFAULT_CODEX_NPM_PACKAGE="@openai/codex"
+MYCODEX_IMAGE_INPUTS_FILE=".mycodex-image-inputs"
+MYCODEX_BUILD_INPUT_LABEL="io.infrasecture.mycodex.build.input-digest"
+MYCODEX_SOURCE_REVISION_LABEL="org.opencontainers.image.revision"
 
 mycodex_validate_codex_version() {
   local version="$1"
@@ -24,6 +27,125 @@ mycodex_validate_image_revision() {
 
   if [[ ! "${revision}" =~ ^[1-9][0-9]*$ ]]; then
     echo "Image revision must be a positive integer without leading zeros: ${revision}" >&2
+    return 1
+  fi
+}
+
+mycodex_validate_build_input_digest() {
+  local digest="$1"
+
+  if [[ ! "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    echo "Image build-input digest is invalid: ${digest}" >&2
+    return 1
+  fi
+}
+
+mycodex_validate_source_revision() {
+  local revision="$1"
+
+  if [[ ! "${revision}" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]; then
+    echo "Image source revision is not a full Git object ID: ${revision}" >&2
+    return 1
+  fi
+}
+
+mycodex_sha256_stream() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{ print $1 }'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{ print $1 }'
+  elif command -v openssl >/dev/null 2>&1; then
+    openssl dgst -sha256 | sed -nE 's/^.*= ([0-9a-f]+)$/\1/p'
+  else
+    echo "Cannot compute image build-input digest: sha256sum, shasum, or openssl is required" >&2
+    return 1
+  fi
+}
+
+mycodex_image_input_paths() {
+  local project_root="$1"
+  local manifest="${project_root}/${MYCODEX_IMAGE_INPUTS_FILE}"
+  local path
+
+  if [[ ! -f "${manifest}" ]]; then
+    echo "Image input manifest not found: ${manifest}" >&2
+    return 1
+  fi
+
+  printf '%s\n' "${MYCODEX_IMAGE_INPUTS_FILE}"
+  while IFS= read -r path || [[ -n "${path}" ]]; do
+    path="${path%$'\r'}"
+    [[ -z "${path}" || "${path}" == \#* ]] && continue
+    if [[ "${path}" == *$'\t'* || "${path}" == *$'\n'* ]]; then
+      echo "Image input paths cannot contain tabs or newlines: ${path@Q}" >&2
+      return 1
+    fi
+    if [[ "${path}" == /* || "${path}" == .. || "${path}" == ../* || "${path}" == */../* ]]; then
+      echo "Invalid image input path in ${manifest}: ${path}" >&2
+      return 1
+    fi
+    if [[ ! -e "${project_root}/${path}" && ! -L "${project_root}/${path}" ]]; then
+      echo "Image input does not exist: ${path}" >&2
+      return 1
+    fi
+    printf '%s\n' "${path}"
+  done <"${manifest}"
+}
+
+mycodex_build_input_digest() {
+  local project_root="$1"
+  local path index_entry mode object_id digest paths_output records=""
+  local -a paths
+
+  if ! command -v git >/dev/null 2>&1; then
+    echo "Cannot identify image inputs without Git" >&2
+    return 1
+  fi
+  if ! git -C "${project_root}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "Image build directory is not a Git worktree: ${project_root}" >&2
+    return 1
+  fi
+
+  paths_output="$(mycodex_image_input_paths "${project_root}")" || return
+  mapfile -t paths <<<"${paths_output}"
+  for path in "${paths[@]}"; do
+    index_entry="$(git -C "${project_root}" ls-files -s -- "${path}")"
+    if [[ -z "${index_entry}" || "${index_entry}" == *$'\n'* ]]; then
+      echo "Image input must be a single tracked path: ${path}" >&2
+      return 1
+    fi
+    mode="${index_entry%% *}"
+    object_id="$(git -C "${project_root}" hash-object --no-filters -- "${path}")" || return
+    records+="${path}"$'\t'"${mode}"$'\t'"${object_id}"$'\n'
+  done
+  digest="$(printf 'mycodex-image-inputs-v1\n%s' "${records}" | mycodex_sha256_stream)" || return
+
+  printf 'sha256:%s\n' "${digest}"
+}
+
+mycodex_source_revision() {
+  local project_root="$1"
+  local revision
+
+  if ! revision="$(git -C "${project_root}" rev-parse --verify HEAD 2>/dev/null)"; then
+    echo "Cannot resolve image source revision from ${project_root}" >&2
+    return 1
+  fi
+  mycodex_validate_source_revision "${revision}" || return
+  printf '%s\n' "${revision}"
+}
+
+mycodex_assert_clean_image_inputs() {
+  local project_root="$1"
+  local status paths_output
+  local -a paths
+
+  paths_output="$(mycodex_image_input_paths "${project_root}")" || return
+  mapfile -t paths <<<"${paths_output}"
+  status="$(git -C "${project_root}" status --porcelain=v1 --untracked-files=all -- "${paths[@]}")"
+  if [[ -n "${status}" ]]; then
+    echo "Published image inputs must be committed and clean:" >&2
+    printf '%s\n' "${status}" >&2
     return 1
   fi
 }

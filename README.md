@@ -59,6 +59,8 @@ Runtime requirements:
 Image build requirements:
 
 - Docker Buildx with `buildx build` and `buildx imagetools inspect --format`;
+- Git plus one of `sha256sum`, `shasum`, or `openssl` for deterministic image
+  input identity;
 - either `curl` or `npm` when the build helper must resolve the newest Codex npm
   version automatically or decide whether a legacy `latest` alias is eligible
   for migration.
@@ -284,57 +286,89 @@ runtime changes.
 Image releases track the bundled Codex version and add a workstation build
 revision. For example, `0.146.0-r2` contains Codex `0.146.0` and is the second
 workstation image release for that Codex version. Revision-qualified tags are
-immutable after publication. Increment the revision whenever the Dockerfile,
-entrypoint, installed tools, or other image inputs change without a Codex
-version change. The terminal `-r<number>` suffix is reserved for this image
-revision; pass the upstream Codex version and image revision separately.
+immutable after publication. The terminal `-r<number>` suffix is reserved for
+this image revision; pass the upstream Codex version and an optional image
+revision separately.
+
+`build-codex-image.sh` selects the revision automatically by default. It hashes
+the tracked image inputs declared in `.mycodex-image-inputs` and records that
+digest, together with the source commit, in every image. The input manifest is
+itself part of the digest. Add every file that can change the built image to
+that manifest when the Docker build gains a new local input.
+
+The publisher compares the computed digest with immutable architecture tags
+and the moving version alias in the registry:
+
+- Matching complete or partial releases reuse their existing revision.
+- Different image inputs select the next unoccupied revision.
+- Occupied legacy revisions without input metadata are never reused.
+- Conflicting architecture metadata fails closed before manifest creation.
+
+Consequently, rerunning the same `--push` command from unchanged inputs does
+not advance the revision, build an image, push an architecture tag, or move an
+alias. Publication requires all declared image inputs to be committed and
+clean. Documentation and other files outside the input manifest do not create
+a new image revision.
 
 The unqualified Codex-version tag (`0.146.0`) and `latest` are moving
 convenience aliases. Runtime discovery prefers immutable revision-qualified
 tags when registry tag listing is available.
 
-Build revision 1 for the latest Codex version published on npm:
+Build the latest Codex version published on npm. Automatic revision selection
+queries the configured registry, including for local builds:
 
 ```bash
 ./bin/build-codex-image.sh
 ```
 
-Build a specific Codex version:
+Build a specific Codex version with an automatically selected revision:
 
 ```bash
-./bin/build-codex-image.sh --version 0.146.0 --revision 1
+./bin/build-codex-image.sh --version 0.146.0
 ```
 
-During local development, rebuild the same unpublished revision with the normal
-Docker build cache:
+During local development, rebuild the selected unpublished revision with the
+normal Docker build cache:
 
 ```bash
-./bin/build-codex-image.sh --version 0.146.0 --revision 2 --refresh-tags
+./bin/build-codex-image.sh --version 0.146.0 --refresh-tags
 ```
 
 `--refresh-tags` only replaces local tags. A revision-qualified registry tag is
-never overwritten; increment `--revision` to publish changed content.
+never overwritten. If automatic registry discovery is unavailable, or an
+unchanged Dockerfile intentionally needs a fresh build because an external
+mutable dependency changed, select an unoccupied revision explicitly:
+
+```bash
+./bin/build-codex-image.sh --version 0.146.0 --revision 3 --push
+```
+
+An explicit revision remains subject to immutable-tag identity checks. It
+cannot overwrite an existing revision that belongs to different image inputs.
 
 Build both release architectures and publish manifest tags:
 
 ```bash
-./bin/build-codex-image.sh --version 0.146.0 --revision 2 --release --push
+./bin/build-codex-image.sh --version 0.146.0 --release --push
 ```
 
-For native-host publishing, use the same Codex version, image revision, and
-`RELEASE_ARCHS` on each builder:
+For native-host publishing, check out the intended committed image inputs and
+use the same Codex version and `RELEASE_ARCHS` on each builder:
 
 ```bash
-ARCHS=amd64 ./bin/build-codex-image.sh --version 0.146.0 --revision 2 --push
-ARCHS=arm64 ./bin/build-codex-image.sh --version 0.146.0 --revision 2 --push
+ARCHS=amd64 ./bin/build-codex-image.sh --version 0.146.0 --push
+ARCHS=arm64 ./bin/build-codex-image.sh --version 0.146.0 --push
 ```
 
-The builders may run in either order. The first push publishes its immutable
-architecture tag and reports which architectures are pending. The push that
-finds the complete `RELEASE_ARCHS` set creates the immutable multi-platform
-manifest and evaluates its moving aliases. A retry that finds its immutable
-architecture tag already in the registry does not pull it and does not create
-local `<version>-r<revision>`, `<version>`, or `latest` aliases.
+The builders independently derive the same build-input digest and revision, and
+may run in either order. The first push publishes its immutable architecture
+tag and reports which architectures are pending. The push that finds the
+complete `RELEASE_ARCHS` set verifies every architecture's identity, creates
+the immutable multi-platform manifest, and evaluates its moving aliases. A
+retry that finds its matching immutable architecture tag already in the
+registry does not pull it and does not create local
+`<version>-r<revision>`, `<version>`, or `latest` aliases. A stale local tag with
+different metadata is rebuilt rather than pushed into the selected release.
 
 Moving aliases are monotonic. Before changing `<version>` or `latest`, the
 publisher reads the Codex version and image revision labels embedded in every
@@ -346,7 +380,9 @@ manifest and its version-specific alias may still be published.
 Legacy aliases without release labels are migrated once. A version-specific
 alias is safe because its name fixes the Codex version; legacy `latest` is
 migrated automatically only when the candidate matches npm's current `latest`
-Codex version.
+Codex version. Legacy immutable architecture or manifest tags remain occupied
+and are skipped by automatic revision selection because their build inputs
+cannot be proven equivalent.
 
 Normal `--push` retries leave all aliases unchanged when the immutable release
 manifest already exists. If both architecture tags were pushed without
@@ -354,17 +390,19 @@ finalization, or an alias update failed after the immutable manifest was
 created, run:
 
 ```bash
-./bin/build-codex-image.sh --version 0.146.0 --revision 2 --manifest
+./bin/build-codex-image.sh --version 0.146.0 --manifest
 ```
 
-`--manifest` is the explicit finalization and recovery operation. It rechecks
-the moving `<version>` alias and, unless `PUBLISH_LATEST=false`, `latest`, even
-when the immutable manifest already exists. It does not bypass monotonic
-protection.
+`--manifest` is the explicit finalization and recovery operation. Automatic
+selection finds the matching partial or complete release. It rechecks the
+moving `<version>` alias and, unless `PUBLISH_LATEST=false`, `latest`, even when
+the immutable manifest already exists. It does not bypass identity or monotonic
+protection. Pass `--revision` when recovering an explicitly selected release.
 
-The `Publish Codex Image` GitHub workflow uses the same model. Automatic Codex
-release events publish revision 1 by default. A manual dispatch can select an
-existing Codex version and a higher image revision for workstation-only fixes.
+The `Publish Codex Image` GitHub workflow invokes the same resolver. Automatic
+Codex release events and manual dispatches default to `auto`; a manual dispatch
+may provide a numeric revision for an intentional external-dependency refresh
+or recovery operation.
 
 The helper builds arch-specific staging tags and publishes manifest tags:
 
@@ -402,7 +440,7 @@ run the newly built version without a registry pull.
 | Variable | Default | Description |
 | --- | --- | --- |
 | `CODEX_VERSION` | `latest` | Codex npm version used by Compose builds. `build-codex-image.sh` instead resolves the newest version or accepts `--version`. |
-| `MYCODEX_IMAGE_REVISION` | `1` | Default workstation image revision used by `build-codex-image.sh`; overridden by `--revision`. |
+| `MYCODEX_IMAGE_REVISION` | `auto` | Revision selection used by `build-codex-image.sh`; set to a positive integer or override with `--revision`. |
 | `MYCODEX_CODEX_NPM_PACKAGE` | `@openai/codex` | npm package used for latest-version discovery. |
 | `ARCHS` | native arch | Architectures built by `build-codex-image.sh`; `--release` defaults to `RELEASE_ARCHS`. |
 | `RELEASE_ARCHS` | `amd64 arm64` | Complete architecture set required before publishing an immutable release manifest. |
@@ -428,6 +466,8 @@ The wrapper owns these values; users normally should not set them directly:
 | --- | --- | --- |
 | `CODEX_VERSION` | `latest` | Version of `@openai/codex` to install. |
 | `MYCODEX_IMAGE_REVISION` | `1` | Workstation image revision recorded in OCI image metadata. |
+| `MYCODEX_SOURCE_REVISION` | `unknown` | Full source commit recorded for release provenance; supplied by `build-codex-image.sh`. |
+| `MYCODEX_BUILD_INPUT_DIGEST` | `unknown` | Deterministic declared-input digest used to coordinate immutable releases; supplied by `build-codex-image.sh`. |
 | `INSTALL_CLAUDE_CODE` | `1` | Install Claude Code. |
 | `INSTALL_GEMINI_CLI` | `1` | Install Gemini CLI. |
 | `INSTALL_OPENCODE` | `1` | Install OpenCode. |
@@ -441,6 +481,7 @@ The wrapper owns these values; users normally should not set them directly:
 │       ├── ci.yml
 │       └── publish-codex-image.yml
 ├── Dockerfile
+├── .mycodex-image-inputs
 ├── docker-compose.yaml
 ├── entrypoint.sh
 ├── bin
@@ -454,6 +495,8 @@ The wrapper owns these values; users normally should not set them directly:
 ```
 
 - `Dockerfile` builds the agent workstation image.
+- `.mycodex-image-inputs` declares the tracked local files whose content selects
+  an automatic image revision.
 - `docker-compose.yaml` defines the `codex` service, workspace mount, and
   persistent state volume.
 - `entrypoint.sh` creates the persistent Byobu/tmux session and keeps the
