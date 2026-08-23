@@ -7,8 +7,8 @@ services:
       XAUTHORITY: /tmp/.mycodex-xauthority
     volumes:
       - type: bind
-        source: /tmp/.X11-unix
-        target: /tmp/.X11-unix
+        source: ${MYCODEX_X11_SOCKET:?myCodex must provide the X11 socket}
+        target: ${MYCODEX_X11_SOCKET:?myCodex must provide the X11 socket}
         read_only: true
         bind:
           create_host_path: false

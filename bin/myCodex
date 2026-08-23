@@ -248,6 +248,7 @@ GUI_MODE=""
 GUI_COMPOSE_FILE=""
 GUI_X11_DISPLAY=""
 GUI_X11_AUTHORITY=""
+GUI_X11_SOCKET=""
 GUI_WAYLAND_SOCKET=""
 GUI_TEMP_FILE=""
 HOST_GROUPS="$(host_group_specs)"
@@ -430,7 +431,7 @@ ensure_extra_volumes_override() {
 
 x11_socket_for_display() {
   local display="${DISPLAY:-}"
-  local display_number
+  local display_number socket
 
   case "${display}" in
     :*) display_number="${display#:}" ;;
@@ -445,7 +446,9 @@ x11_socket_for_display() {
   fi
 
   display_number="${BASH_REMATCH[1]}"
-  [[ -S "/tmp/.X11-unix/X${display_number}" ]]
+  socket="/tmp/.X11-unix/X${display_number}"
+  [[ -S "${socket}" ]] || return 1
+  printf '%s\n' "${socket}"
 }
 
 wayland_socket_for_display() {
@@ -481,7 +484,7 @@ resolve_gui_mode() {
       GUI_MODE=none
       ;;
     x11)
-      if ! x11_socket_for_display; then
+      if ! GUI_X11_SOCKET="$(x11_socket_for_display)"; then
         die "--gui=x11 requires a local Unix DISPLAY and its /tmp/.X11-unix socket; DISPLAY=${DISPLAY:-<unset>}"
       fi
       GUI_MODE=x11
@@ -497,7 +500,7 @@ resolve_gui_mode() {
       if wayland_socket="$(wayland_socket_for_display)"; then
         GUI_WAYLAND_SOCKET="${wayland_socket}"
         GUI_MODE=wayland
-      elif x11_socket_for_display; then
+      elif GUI_X11_SOCKET="$(x11_socket_for_display)"; then
         GUI_MODE=x11
       else
         die "--gui could not find a usable local Wayland or X11 display"
@@ -720,6 +723,7 @@ run_docker_compose() {
     MYCODEX_CODEX_HOME="${CONTAINER_HOME}/.codex" \
     MYCODEX_X11_DISPLAY="${GUI_X11_DISPLAY}" \
     MYCODEX_X11_AUTHORITY="${GUI_X11_AUTHORITY}" \
+    MYCODEX_X11_SOCKET="${GUI_X11_SOCKET}" \
     MYCODEX_WAYLAND_SOCKET="${GUI_WAYLAND_SOCKET}" \
     "${compose_cmd[@]}" "${args[@]}" "$@"
 }

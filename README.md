@@ -178,8 +178,9 @@ myCodex --gui=wayland
 
 X11 requires the host `xauth` command. The launcher copies only the active
 display credentials into a private file under the user's XDG state directory;
-it does not use `xhost +`. The X11 socket directory and authorization file are
-mounted read-only.
+it does not use `xhost +`. Only the selected `/tmp/.X11-unix/X<N>` socket and
+the authorization file are mounted read-only; other X server sockets remain
+outside the container.
 
 Wayland mounts only the active compositor socket, not the full
 `XDG_RUNTIME_DIR`. Codex currently reads the Linux clipboard through `arboard`;

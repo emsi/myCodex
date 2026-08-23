@@ -115,6 +115,7 @@ set -euo pipefail
   printf '\n'
   printf 'x11_display=%s\n' "${MYCODEX_X11_DISPLAY:-}"
   printf 'x11_authority=%s\n' "${MYCODEX_X11_AUTHORITY:-}"
+  printf 'x11_socket=%s\n' "${MYCODEX_X11_SOCKET:-}"
   printf 'wayland_socket=%s\n' "${MYCODEX_WAYLAND_SOCKET:-}"
 } >>"${FAKE_COMPOSE_LOG}"
 
@@ -174,10 +175,16 @@ run_launcher() {
 
 assert_contains "${PROJECT_ROOT}/docker-compose.yaml" \
   'io.infrasecture.mycodex.gui: none'
+# shellcheck disable=SC2016 # Assert literal Compose interpolation syntax.
 assert_contains "${PROJECT_ROOT}/docker-compose.gui-x11.yaml" \
-  'source: /tmp/.X11-unix'
+  'source: ${MYCODEX_X11_SOCKET:?myCodex must provide the X11 socket}'
+# shellcheck disable=SC2016 # Assert literal Compose interpolation syntax.
+assert_contains "${PROJECT_ROOT}/docker-compose.gui-x11.yaml" \
+  'target: ${MYCODEX_X11_SOCKET:?myCodex must provide the X11 socket}'
 assert_contains "${PROJECT_ROOT}/docker-compose.gui-x11.yaml" \
   'read_only: true'
+assert_not_contains "${PROJECT_ROOT}/docker-compose.gui-x11.yaml" \
+  'source: /tmp/.X11-unix'
 assert_contains "${PROJECT_ROOT}/docker-compose.gui-wayland.yaml" \
   'target: /tmp/.mycodex-wayland'
 assert_not_contains "${PROJECT_ROOT}/docker-compose.gui-x11.yaml" 'network_mode:'
@@ -198,6 +205,7 @@ FAKE_CONTAINER_EXISTS=0 \
   run_launcher --gui=x11 up -d >"${x11_output}" 2>&1
 assert_contains "${FAKE_COMPOSE_LOG}" "-f ${PROJECT_ROOT}/docker-compose.gui-x11.yaml"
 assert_contains "${FAKE_COMPOSE_LOG}" "x11_display=:${x11_display_number}"
+assert_contains "${FAKE_COMPOSE_LOG}" "x11_socket=${x11_socket}"
 xauth_file="${tmp_dir}/state/mycodex/sample-project-codex/xauthority"
 [[ -s "${xauth_file}" ]] || fail "scoped Xauthority file was not created"
 [[ "$(stat -c %a "${xauth_file}")" == 600 ]] || fail "Xauthority mode is not 600"
