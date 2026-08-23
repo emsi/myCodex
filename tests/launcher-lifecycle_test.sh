@@ -40,7 +40,10 @@ printf 'docker %s\n' "$*" >>"${FAKE_DOCKER_LOG}"
 case "${1:-} ${2:-}" in
   "volume inspect") exit 0 ;;
   "image inspect")
-    [[ -f "${FAKE_IMAGE_STATE}" ]]
+    [[ -f "${FAKE_IMAGE_STATE}" ]] || exit 1
+    if [[ " $* " == *' --format '* ]]; then
+      printf '%s\n' "${FAKE_SELECTED_CODEX_VERSION:-0.147.0}"
+    fi
     ;;
   "inspect --format")
     case "$3" in
@@ -114,13 +117,53 @@ run_launcher() {
 
 reset_state
 running_output="${tmp_dir}/running.out"
-FAKE_RUNNING=1 run_launcher >"${running_output}" 2>&1
+touch "${FAKE_IMAGE_STATE}"
+FAKE_RUNNING=1 \
+FAKE_SELECTED_CODEX_VERSION=0.150.0 \
+FAKE_LATEST_CODEX_VERSION=0.150.0 \
+  run_launcher >"${running_output}" 2>&1
 assert_contains "${FAKE_COMPOSE_LOG}" "ps --status running --services"
 assert_contains "${FAKE_COMPOSE_LOG}" "exec -it codex"
 assert_not_contains "${FAKE_COMPOSE_LOG}" " pull "
 assert_not_contains "${FAKE_COMPOSE_LOG}" " up "
-assert_not_contains "${FAKE_DOCKER_LOG}" "image inspect"
-assert_contains "${running_output}" "Codex 0.149.0 is available upstream; this container runs 0.147.0."
+assert_contains "${FAKE_DOCKER_LOG}" "image inspect --format"
+assert_contains "${running_output}" "Selected local image ghcr.io/infrasecture/harness-workstation:latest contains Codex 0.150.0;"
+assert_contains "${running_output}" "this container runs 0.147.0. Run 'myCodex up -d' to apply it."
+assert_not_contains "${running_output}" "available upstream"
+
+reset_state
+touch "${FAKE_IMAGE_STATE}"
+upstream_output="${tmp_dir}/upstream.out"
+FAKE_RUNNING=1 \
+FAKE_SELECTED_CODEX_VERSION=0.147.0 \
+FAKE_LATEST_CODEX_VERSION=0.150.0 \
+  run_launcher >"${upstream_output}" 2>&1
+assert_contains "${upstream_output}" "Codex 0.150.0 is available upstream; this container runs 0.147.0."
+assert_contains "${upstream_output}" "The selected local image contains Codex 0.147.0."
+assert_contains "${upstream_output}" "Run 'myCodex pull' to refresh it"
+
+reset_state
+touch "${FAKE_IMAGE_STATE}"
+partial_output="${tmp_dir}/partial.out"
+FAKE_RUNNING=1 \
+FAKE_SELECTED_CODEX_VERSION=0.149.0 \
+FAKE_LATEST_CODEX_VERSION=0.150.0 \
+  run_launcher >"${partial_output}" 2>&1
+assert_contains "${partial_output}" "Selected local image ghcr.io/infrasecture/harness-workstation:latest contains Codex 0.149.0;"
+assert_contains "${partial_output}" "Codex 0.150.0 is available upstream, newer than the selected local image's 0.149.0."
+
+reset_state
+touch "${FAKE_IMAGE_STATE}"
+revision_output="${tmp_dir}/revision.out"
+FAKE_RUNNING=1 \
+FAKE_SELECTED_CODEX_VERSION=0.150.0 \
+FAKE_LATEST_CODEX_VERSION=0.151.0 \
+MYCODEX_IMAGE_TAG=0.150.0-r17 \
+  run_launcher >"${revision_output}" 2>&1
+assert_contains "${FAKE_DOCKER_LOG}" "ghcr.io/infrasecture/harness-workstation:0.150.0-r17"
+assert_contains "${revision_output}" "Selected local image ghcr.io/infrasecture/harness-workstation:0.150.0-r17 contains Codex 0.150.0;"
+assert_contains "${revision_output}" "Codex 0.151.0 is available upstream, newer than the selected local image's 0.150.0."
+assert_contains "${revision_output}" "MYCODEX_IMAGE_TAG=0.150.0-r17 pins this image"
 
 reset_state
 fallback_output="${tmp_dir}/fallback.out"
@@ -130,8 +173,13 @@ assert_contains "${fallback_output}" "Codex 0.149.0 is available upstream; this 
 
 reset_state
 offline_output="${tmp_dir}/offline.out"
-FAKE_RUNNING=1 FAKE_UPDATE_FAILURE=1 run_launcher >"${offline_output}" 2>&1
+touch "${FAKE_IMAGE_STATE}"
+FAKE_RUNNING=1 \
+FAKE_SELECTED_CODEX_VERSION=0.149.0 \
+FAKE_UPDATE_FAILURE=1 \
+  run_launcher >"${offline_output}" 2>&1
 assert_contains "${FAKE_COMPOSE_LOG}" "exec -it codex"
+assert_contains "${offline_output}" "Selected local image ghcr.io/infrasecture/harness-workstation:latest contains Codex 0.149.0;"
 assert_not_contains "${offline_output}" "available upstream"
 
 reset_state
@@ -139,6 +187,18 @@ current_output="${tmp_dir}/current.out"
 FAKE_RUNNING=1 FAKE_LATEST_CODEX_VERSION=0.147.0 run_launcher >"${current_output}" 2>&1
 assert_contains "${FAKE_COMPOSE_LOG}" "exec -it codex"
 assert_not_contains "${current_output}" "available upstream"
+
+reset_state
+touch "${FAKE_IMAGE_STATE}"
+older_output="${tmp_dir}/older.out"
+FAKE_RUNNING=1 \
+FAKE_CURRENT_CODEX_VERSION=0.150.0 \
+FAKE_SELECTED_CODEX_VERSION=0.149.0 \
+FAKE_LATEST_CODEX_VERSION=0.149.0 \
+  run_launcher >"${older_output}" 2>&1
+assert_contains "${FAKE_COMPOSE_LOG}" "exec -it codex"
+assert_not_contains "${older_output}" "available upstream"
+assert_not_contains "${older_output}" "Selected local image"
 
 reset_state
 touch "${FAKE_IMAGE_STATE}"

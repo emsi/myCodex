@@ -266,10 +266,13 @@ container is never replaced merely because the remote `latest` tag moved.
 `myCodex pull` only pulls the selected Compose service; use `myCodex up -d`
 explicitly to apply a pulled image.
 
-Before an interactive attach, the launcher performs a short, best-effort check
-for a newer upstream Codex release. The check is informational: failure or an
-offline registry never blocks attachment, and a newer npm release does not
-imply that a matching workstation image is already published. Set
+Before an interactive attach, the launcher compares the running Codex version
+with the selected local image's version and performs a short, best-effort check
+for a newer upstream Codex release. It reports when a local image is ready to
+apply and distinguishes that from an upstream release that is not yet local.
+Image revision suffixes such as `-r2` remain part of the selected tag; version
+comparison uses the image's dedicated Codex-version label. The check is
+informational, and failure or an offline registry never blocks attachment. Set
 `MYCODEX_UPDATE_CHECK=0` to disable it.
 
 ### Direct Compose Guard

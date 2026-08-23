@@ -546,6 +546,12 @@ selected_image_exists() {
   docker image inspect "${IMAGE_NAME}:${IMAGE_TAG}" >/dev/null 2>&1
 }
 
+selected_image_codex_version() {
+  docker image inspect \
+    --format '{{index .Config.Labels "io.infrasecture.mycodex.codex.version"}}' \
+    "${IMAGE_NAME}:${IMAGE_TAG}" 2>/dev/null || true
+}
+
 ensure_selected_image() {
   if selected_image_exists; then
     return
@@ -559,7 +565,8 @@ ensure_selected_image() {
 }
 
 notify_newer_codex() {
-  local current_version latest_version comparison
+  local current_version selected_version latest_version comparison
+  local selected_update_available=0
 
   [[ "${UPDATE_CHECK}" == 1 ]] || return 0
 
@@ -579,6 +586,18 @@ notify_newer_codex() {
   fi
   mycodex_validate_codex_version "${current_version}" >/dev/null 2>&1 || return 0
 
+  selected_version="$(selected_image_codex_version)"
+  if mycodex_validate_codex_version "${selected_version}" >/dev/null 2>&1; then
+    comparison="$(mycodex_compare_semver "${current_version}" "${selected_version}")"
+    if [[ "${comparison}" == -1 ]]; then
+      selected_update_available=1
+      echo "myCodex: Selected local image ${IMAGE_NAME}:${IMAGE_TAG} contains Codex ${selected_version};" >&2
+      echo "myCodex: this container runs ${current_version}. Run 'myCodex up -d' to apply it." >&2
+    fi
+  else
+    selected_version=""
+  fi
+
   if ! latest_version="$(
     docker exec "${CONTAINER_NAME}" \
       curl --connect-timeout 2 --max-time 3 -fsSL \
@@ -594,10 +613,37 @@ notify_newer_codex() {
   comparison="$(mycodex_compare_semver "${current_version}" "${latest_version}")"
   [[ "${comparison}" == -1 ]] || return 0
 
+  if [[ "${selected_update_available}" == 1 ]] \
+    && [[ "$(mycodex_compare_semver "${latest_version}" "${selected_version}")" != 1 ]]; then
+    return 0
+  fi
+
+  if [[ "${selected_update_available}" == 1 ]]; then
+    echo "myCodex: Codex ${latest_version} is available upstream, newer than the selected local image's ${selected_version}." >&2
+    if [[ "${IMAGE_TAG}" == latest ]]; then
+      echo "myCodex: Run 'myCodex pull' to refresh it; pulling does not recreate this container." >&2
+    else
+      echo "myCodex: MYCODEX_IMAGE_TAG=${IMAGE_TAG} pins this image; select a newer tag to update it." >&2
+    fi
+    return 0
+  fi
+
   echo "myCodex: Codex ${latest_version} is available upstream; this container runs ${current_version}." >&2
-  echo "myCodex: A matching workstation image may not be published yet." >&2
-  echo "myCodex: Run 'myCodex pull' to fetch the latest published image, then" >&2
-  echo "myCodex: run 'myCodex up -d' explicitly to apply it." >&2
+  if [[ -n "${selected_version}" ]]; then
+    echo "myCodex: The selected local image contains Codex ${selected_version}." >&2
+    if [[ "${IMAGE_TAG}" == latest ]]; then
+      echo "myCodex: Run 'myCodex pull' to refresh it; pulling does not recreate this container." >&2
+    else
+      echo "myCodex: MYCODEX_IMAGE_TAG=${IMAGE_TAG} pins this image; select a newer tag to update it." >&2
+    fi
+  else
+    echo "myCodex: A matching workstation image is not available locally." >&2
+    if [[ "${IMAGE_TAG}" == latest ]]; then
+      echo "myCodex: Run 'myCodex pull' to fetch the latest published image." >&2
+    else
+      echo "myCodex: MYCODEX_IMAGE_TAG=${IMAGE_TAG} pins the selected image." >&2
+    fi
+  fi
 }
 
 attach_with_update_check() {
