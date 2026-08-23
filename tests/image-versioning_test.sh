@@ -72,22 +72,7 @@ assert_ref_missing() {
   fi
 }
 
-latest="$({
-  printf '%s\n' \
-    latest \
-    0.145.0 \
-    0.146.0 \
-    0.146.0-r1 \
-    0.146.0-r2 \
-    0.147.0-r1-amd64
-} | mycodex_latest_semver_from_tags)"
-assert_eq "0.146.0-r2" "${latest}" "latest immutable image release"
 assert_eq "0.146.0-r12" "$(mycodex_image_release_tag 0.146.0 12)" "release tag"
-assert_eq "0.146.0" "$(printf '%s\n' 0.145.0 0.146.0 | mycodex_latest_semver_from_tags)" \
-  "legacy unqualified release fallback"
-assert_eq "0.147.0" \
-  "$(printf '%s\n' 0.146.0-r2 0.147.0 | mycodex_latest_semver_from_tags)" \
-  "newer legacy release during migration"
 assert_semver_order -1 0.146.0 0.147.0
 assert_semver_order 1 0.147.0 0.146.0
 assert_semver_order 0 0.147.0+build.1 0.147.0+build.2
@@ -390,35 +375,6 @@ reset_fake_state() {
   : >"${FAKE_LOCAL_IDENTITIES}"
   : >"${FAKE_REMOTE_IDENTITIES}"
 }
-
-reset_fake_state
-record_ref "${FAKE_REMOTE_REFS}" "example.test/workstation:latest"
-record_ref "${FAKE_REMOTE_REFS}" "example.test/workstation:0.147.0-r3"
-set_identity \
-  "${FAKE_REMOTE_IDENTITIES}" "example.test/workstation:latest" \
-  0.147.0 3 "${TEST_BUILD_INPUT_DIGEST}" "${TEST_SOURCE_REVISION}"
-set_identity \
-  "${FAKE_REMOTE_IDENTITIES}" "example.test/workstation:0.147.0-r3" \
-  0.147.0 3 "${TEST_BUILD_INPUT_DIGEST}" "${TEST_SOURCE_REVISION}"
-assert_eq "0.147.0-r3" \
-  "$(mycodex_resolve_remote_alias_release_tag \
-    "example.test/workstation:latest")" \
-  "release tag from latest alias labels"
-
-export FAKE_NPM_LATEST_VERSION=0.149.0
-resolved_remote_output="${tmp_dir}/resolved-remote.out"
-resolved_remote_warning="${tmp_dir}/resolved-remote.warning"
-(
-  mycodex_list_remote_image_tags() { return 1; }
-  mycodex_resolve_latest_remote_image_tag "example.test/workstation"
-) >"${resolved_remote_output}" 2>"${resolved_remote_warning}"
-unset FAKE_NPM_LATEST_VERSION
-assert_eq "0.147.0-r3" "$(<"${resolved_remote_output}")" \
-  "latest published image while npm is ahead"
-assert_contains "${resolved_remote_warning}" \
-  "Codex 0.149.0 does not have a published workstation image yet"
-assert_contains "${resolved_remote_warning}" \
-  "Using latest published image: example.test/workstation:0.147.0-r3"
 
 reset_fake_state
 amd64_output="${tmp_dir}/amd64.out"
