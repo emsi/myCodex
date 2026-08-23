@@ -1,0 +1,14 @@
+services:
+  codex:
+    labels:
+      io.infrasecture.mycodex.gui: wayland
+    environment:
+      WAYLAND_DISPLAY: /tmp/.mycodex-wayland
+      XDG_SESSION_TYPE: wayland
+    volumes:
+      - type: bind
+        source: ${MYCODEX_WAYLAND_SOCKET:?myCodex must provide the Wayland socket}
+        target: /tmp/.mycodex-wayland
+        read_only: true
+        bind:
+          create_host_path: false

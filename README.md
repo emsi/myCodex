@@ -159,6 +159,62 @@ Use an isolated state volume for the current project:
 myCodex --private-env
 ```
 
+### Local GUI And Screenshot Clipboard Access
+
+The default container is headless. To let Codex read images from the local
+desktop clipboard, opt in when the container is first created:
+
+```bash
+myCodex --gui
+```
+
+`--gui` selects an active Wayland socket first and otherwise uses a local X11
+Unix display. Force a backend when needed:
+
+```bash
+myCodex --gui=x11
+myCodex --gui=wayland
+```
+
+X11 requires the host `xauth` command. The launcher copies only the active
+display credentials into a private file under the user's XDG state directory;
+it does not use `xhost +`. Only the selected `/tmp/.X11-unix/X<N>` socket and
+the authorization file are mounted read-only; other X server sockets remain
+outside the container.
+
+Wayland mounts only the active compositor socket, not the full
+`XDG_RUNTIME_DIR`. Codex currently reads the Linux clipboard through `arboard`;
+Wayland image paste therefore also depends on the compositor exposing a
+clipboard protocol supported by that library. If a Wayland session also offers
+XWayland and image paste fails, try `--gui=x11`.
+
+GUI access is part of the Docker container configuration. It cannot be added,
+removed, or switched by attaching to an existing running container. Later bare
+`myCodex` invocations simply attach and preserve the established mode; they do
+not need `--gui` again. `start` and `restart` also preserve the existing mounts.
+
+Change an established mode through an explicit Compose reconciliation:
+
+```bash
+myCodex --gui=x11 up -d       # enable X11 or switch to it
+myCodex --gui=wayland up -d   # enable Wayland or switch to it
+myCodex --no-gui up -d        # return to the headless configuration
+```
+
+Compose may replace the container during these operations, ending its tmux
+session. A plain `myCodex up -d` refuses to reconcile a GUI-enabled container
+so it cannot silently remove GUI access; repeat the current `--gui=<backend>`
+when updating its image or other configuration. `myCodex pull` never recreates
+the container.
+
+GUI access weakens the default isolation boundary: an agent with access to the
+display protocol can interact with or observe parts of the desktop session.
+The integration remains opt-in and retains Docker bridge networking. It does
+not forward host networking, D-Bus, audio, GPU devices, or the rest of the
+desktop runtime directory. This initial implementation supports a local Docker
+daemon and local graphical session; SSH-specific forwarding and remote Docker
+daemons are outside its scope.
+
 Mount additional directories:
 
 ```bash
@@ -199,8 +255,9 @@ myCodex down
 ```
 
 `myCodex info` prints the resolved configuration — project name, image, the
-container home and workdir, host identity, and the state volume name (and
-whether it exists) — reflecting any options on the same line (e.g.
+container home and workdir, host identity, selected and established GUI modes,
+and the state volume name (and whether it exists) — reflecting options on the
+same line (e.g.
 `myCodex --private-env info`). It is read-only: it reads volume metadata but
 never creates a volume or starts a container.
 
@@ -485,6 +542,8 @@ The wrapper owns these values; users normally should not set them directly:
 │       └── publish-codex-image.yml
 ├── Dockerfile
 ├── .mycodex-image-inputs
+├── docker-compose.gui-wayland.yaml
+├── docker-compose.gui-x11.yaml
 ├── docker-compose.yaml
 ├── entrypoint.sh
 ├── bin
@@ -494,7 +553,9 @@ The wrapper owns these values; users normally should not set them directly:
 │       └── mycodex-image.sh
 └── tests
     ├── image-versioning_test.sh
-    └── launcher-config_test.sh
+    ├── launcher-config_test.sh
+    ├── launcher-gui_test.sh
+    └── launcher-lifecycle_test.sh
 ```
 
 - `Dockerfile` builds the agent workstation image.
@@ -502,6 +563,8 @@ The wrapper owns these values; users normally should not set them directly:
   an automatic image revision.
 - `docker-compose.yaml` defines the `codex` service, workspace mount, and
   persistent state volume.
+- `docker-compose.gui-*.yaml` add the explicitly selected local display socket
+  and environment without changing the base network configuration.
 - `entrypoint.sh` creates the persistent Byobu/tmux session and keeps the
   container alive.
 - `bin/myCodex` is the primary launcher and Compose wrapper.
@@ -510,7 +573,8 @@ The wrapper owns these values; users normally should not set them directly:
 - `.github/workflows/ci.yml` runs shell and behavioral regression tests.
 - `.github/workflows/publish-codex-image.yml` publishes revisioned multi-platform
   image releases.
-- `tests/` covers release/version behavior and launcher configuration contracts.
+- `tests/` covers release/version behavior and launcher configuration,
+  lifecycle, and GUI security contracts.
 
 ## Publishing Checklist
 
