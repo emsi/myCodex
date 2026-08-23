@@ -87,6 +87,8 @@ PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 source "${SCRIPT_DIR}/lib/mycodex-image.sh"
 
 COMPOSE_FILE="${PROJECT_ROOT}/docker-compose.yaml"
+GUI_X11_COMPOSE_FILE="${PROJECT_ROOT}/docker-compose.gui-x11.yaml"
+GUI_WAYLAND_COMPOSE_FILE="${PROJECT_ROOT}/docker-compose.gui-wayland.yaml"
 SERVICE="${CODEX_SERVICE:-codex}"
 SESSION="${CODEX_BYOBU_SESSION:-codex}"
 AUTO_ATTACH="${CODEX_AUTO_ATTACH:-0}"
@@ -113,6 +115,11 @@ fi
 DEFAULT_CONTAINER_NAME="${PROJECT_NAME}-codex"
 CONTAINER_NAME="${CODEX_CONTAINER_NAME:-${DEFAULT_CONTAINER_NAME}}"
 
+if [[ ! "${CONTAINER_NAME}" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]]; then
+  printf 'myCodex: invalid Docker container name: %s\n' "${CONTAINER_NAME}" >&2
+  exit 2
+fi
+
 usage() {
   cat <<'EOF'
 Usage:
@@ -130,6 +137,8 @@ Usage:
 
 Options:
   --private-env                      Use a per-project Codex state volume
+  --gui[=auto|x11|wayland]           Explicitly enable local GUI access
+  --no-gui                           Explicitly select headless operation
   -v, --volume <spec>                Add an extra Docker-style volume mount
   -f, --compose-file <path>          Add an extra Compose override file
 EOF
@@ -233,14 +242,34 @@ ADDITIONAL_COMPOSE_FILES=()
 PRIVATE_ENV=0
 RECONCILE_REQUIRED=0
 EXTRA_VOLUME_OVERRIDE_FILE=""
+GUI_OPTION_SPECIFIED=0
+GUI_REQUEST=""
+GUI_MODE=""
+GUI_COMPOSE_FILE=""
+GUI_X11_DISPLAY=""
+GUI_X11_AUTHORITY=""
+GUI_WAYLAND_SOCKET=""
+GUI_TEMP_FILE=""
 HOST_GROUPS="$(host_group_specs)"
 
 cleanup() {
   if [[ -n "${EXTRA_VOLUME_OVERRIDE_FILE}" ]]; then
     rm -f -- "${EXTRA_VOLUME_OVERRIDE_FILE}"
   fi
+  if [[ -n "${GUI_TEMP_FILE}" ]]; then
+    rm -f -- "${GUI_TEMP_FILE}"
+  fi
 }
 trap cleanup EXIT
+
+set_gui_request() {
+  if [[ "${GUI_OPTION_SPECIFIED}" == 1 ]]; then
+    die "GUI mode was specified more than once"
+  fi
+
+  GUI_OPTION_SPECIFIED=1
+  GUI_REQUEST="$1"
+}
 
 add_extra_volume() {
   local spec="$1"
@@ -301,6 +330,18 @@ while [[ $# -gt 0 ]]; do
       RECONCILE_REQUIRED=1
       shift
       ;;
+    --gui)
+      set_gui_request auto
+      shift
+      ;;
+    --gui=*)
+      set_gui_request "${1#--gui=}"
+      shift
+      ;;
+    --no-gui)
+      set_gui_request none
+      shift
+      ;;
     -v|--volume)
       if [[ $# -lt 2 ]]; then
         die "$1 requires a volume spec"
@@ -339,6 +380,11 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+case "${GUI_REQUEST}" in
+  ''|none|auto|x11|wayland) ;;
+  *) die "GUI mode must be auto, x11, or wayland: ${GUI_REQUEST}" ;;
+esac
 
 STATE_VOLUME_NAME="${MYCODEX_STATE_VOLUME_NAME:-codex_state}"
 STATE_VOLUME_KIND="shared"
@@ -380,6 +426,157 @@ ensure_extra_volumes_override() {
       printf '\n'
     done
   } >"${EXTRA_VOLUME_OVERRIDE_FILE}"
+}
+
+x11_socket_for_display() {
+  local display="${DISPLAY:-}"
+  local display_number
+
+  case "${display}" in
+    :*) display_number="${display#:}" ;;
+    unix:*) display_number="${display#unix:}" ;;
+    unix/:*) display_number="${display#unix/:}" ;;
+    */unix:*) display_number="${display##*:}" ;;
+    *) return 1 ;;
+  esac
+
+  if [[ ! "${display_number}" =~ ^([0-9]+)(\.[0-9]+)?$ ]]; then
+    return 1
+  fi
+
+  display_number="${BASH_REMATCH[1]}"
+  [[ -S "/tmp/.X11-unix/X${display_number}" ]]
+}
+
+wayland_socket_for_display() {
+  local display="${WAYLAND_DISPLAY:-}"
+  local runtime_dir="${XDG_RUNTIME_DIR:-}"
+  local socket
+
+  [[ -n "${display}" ]] || return 1
+  case "${display}" in
+    *$'\n'*|*$'\r'*) return 1 ;;
+    /*) socket="${display}" ;;
+    */*) return 1 ;;
+    *)
+      [[ -n "${runtime_dir}" ]] || return 1
+      socket="${runtime_dir}/${display}"
+      ;;
+  esac
+
+  [[ -S "${socket}" ]] || return 1
+  printf '%s\n' "${socket}"
+}
+
+resolve_gui_mode() {
+  local wayland_socket
+
+  if [[ -n "${GUI_MODE}" ]]; then
+    printf '%s\n' "${GUI_MODE}"
+    return
+  fi
+
+  case "${GUI_REQUEST:-none}" in
+    none|'')
+      GUI_MODE=none
+      ;;
+    x11)
+      if ! x11_socket_for_display; then
+        die "--gui=x11 requires a local Unix DISPLAY and its /tmp/.X11-unix socket; DISPLAY=${DISPLAY:-<unset>}"
+      fi
+      GUI_MODE=x11
+      ;;
+    wayland)
+      if ! wayland_socket="$(wayland_socket_for_display)"; then
+        die "--gui=wayland requires an active WAYLAND_DISPLAY socket under XDG_RUNTIME_DIR"
+      fi
+      GUI_WAYLAND_SOCKET="${wayland_socket}"
+      GUI_MODE=wayland
+      ;;
+    auto)
+      if wayland_socket="$(wayland_socket_for_display)"; then
+        GUI_WAYLAND_SOCKET="${wayland_socket}"
+        GUI_MODE=wayland
+      elif x11_socket_for_display; then
+        GUI_MODE=x11
+      else
+        die "--gui could not find a usable local Wayland or X11 display"
+      fi
+      ;;
+  esac
+
+  printf '%s\n' "${GUI_MODE}"
+}
+
+prepare_x11_authority() {
+  local gui_state_dir xauth_output
+
+  command -v xauth >/dev/null 2>&1 \
+    || die "--gui=x11 requires the host xauth command"
+
+  gui_state_dir="$(gui_state_directory)"
+  mkdir -p -- "${gui_state_dir}"
+  chmod 700 -- "${gui_state_dir}"
+  GUI_X11_AUTHORITY="${gui_state_dir}/xauthority"
+  GUI_TEMP_FILE="$(mktemp "${gui_state_dir}/xauthority.XXXXXX")"
+  chmod 600 -- "${GUI_TEMP_FILE}"
+
+  if ! xauth_output="$(xauth nlist "${DISPLAY}" 2>/dev/null)" \
+    || [[ -z "${xauth_output}" ]] \
+    || ! printf '%s\n' "${xauth_output}" \
+      | sed -e 's/^..../ffff/' \
+      | xauth -f "${GUI_TEMP_FILE}" nmerge - >/dev/null 2>&1 \
+    || [[ ! -s "${GUI_TEMP_FILE}" ]]; then
+    die "could not copy X11 credentials for DISPLAY=${DISPLAY}; check that xauth can read the active display"
+  fi
+
+  if [[ -f "${GUI_X11_AUTHORITY}" ]]; then
+    cp -- "${GUI_TEMP_FILE}" "${GUI_X11_AUTHORITY}"
+    rm -f -- "${GUI_TEMP_FILE}"
+  else
+    mv -- "${GUI_TEMP_FILE}" "${GUI_X11_AUTHORITY}"
+  fi
+  GUI_TEMP_FILE=""
+  chmod 600 -- "${GUI_X11_AUTHORITY}"
+  GUI_X11_DISPLAY="${DISPLAY}"
+}
+
+gui_state_directory() {
+  local state_home="${XDG_STATE_HOME:-}"
+
+  if [[ -z "${state_home}" ]]; then
+    [[ -n "${HOME:-}" ]] || die "--gui=x11 requires HOME or XDG_STATE_HOME"
+    state_home="${HOME}/.local/state"
+  fi
+  [[ "${state_home}" == /* ]] \
+    || die "XDG_STATE_HOME must be an absolute path: ${state_home}"
+
+  printf '%s/mycodex/%s\n' "${state_home}" "${CONTAINER_NAME}"
+}
+
+gui_option_for_mode() {
+  case "$1" in
+    none) printf '%s\n' --no-gui ;;
+    *) printf '%s\n' "--gui=$1" ;;
+  esac
+}
+
+prepare_gui() {
+  resolve_gui_mode >/dev/null
+
+  if [[ -n "${GUI_COMPOSE_FILE}" || "${GUI_MODE}" == none ]]; then
+    return
+  fi
+
+  case "${GUI_MODE}" in
+    x11)
+      prepare_x11_authority
+      GUI_COMPOSE_FILE="${GUI_X11_COMPOSE_FILE}"
+      ;;
+    wayland)
+      GUI_COMPOSE_FILE="${GUI_WAYLAND_COMPOSE_FILE}"
+      ;;
+  esac
 }
 
 has_arg() {
@@ -480,6 +677,9 @@ up_args_without_wait() {
 compose_args() {
   printf '%s\n' -p "${PROJECT_NAME}" -f "${COMPOSE_FILE}"
   local file
+  if [[ -n "${GUI_COMPOSE_FILE}" ]]; then
+    printf '%s\n' -f "${GUI_COMPOSE_FILE}"
+  fi
   for file in "${ADDITIONAL_COMPOSE_FILES[@]}"; do
     printf '%s\n' -f "${file}"
   done
@@ -518,18 +718,23 @@ run_docker_compose() {
     MYCODEX_CONTAINER_HOME="${CONTAINER_HOME}" \
     MYCODEX_WORKDIR="${CONTAINER_WORKDIR}" \
     MYCODEX_CODEX_HOME="${CONTAINER_HOME}/.codex" \
+    MYCODEX_X11_DISPLAY="${GUI_X11_DISPLAY}" \
+    MYCODEX_X11_AUTHORITY="${GUI_X11_AUTHORITY}" \
+    MYCODEX_WAYLAND_SOCKET="${GUI_WAYLAND_SOCKET}" \
     "${compose_cmd[@]}" "${args[@]}" "$@"
 }
 
 compose_run() {
   ensure_state_volume
   ensure_extra_volumes_override
+  prepare_gui
   run_docker_compose "$@"
 }
 
 compose() {
   ensure_state_volume
   ensure_extra_volumes_override
+  prepare_gui
   run_docker_compose "$@"
 }
 
@@ -539,7 +744,58 @@ compose_without_state_volume_creation() {
 }
 
 is_running() {
-  compose_run ps --status running --services 2>/dev/null | grep -Fxq "${SERVICE}"
+  ensure_state_volume
+  ensure_extra_volumes_override
+  run_docker_compose ps --status running --services 2>/dev/null | grep -Fxq "${SERVICE}"
+}
+
+container_gui_mode() {
+  local mode
+
+  mode="$(
+    docker inspect \
+      --format '{{index .Config.Labels "io.infrasecture.mycodex.gui"}}' \
+      "${CONTAINER_NAME}" 2>/dev/null || true
+  )"
+  case "${mode}" in
+    x11|wayland) printf '%s\n' "${mode}" ;;
+    ''|none|'<no value>') printf 'none\n' ;;
+    *) printf '%s\n' "${mode}" ;;
+  esac
+}
+
+container_exists() {
+  docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1
+}
+
+guard_attach_gui_mode() {
+  local current requested
+
+  [[ "${GUI_OPTION_SPECIFIED}" == 1 ]] || return 0
+  current="$(container_gui_mode)"
+  requested="$(resolve_gui_mode)"
+  if [[ "${requested}" != "${current}" ]]; then
+    die "container ${CONTAINER_NAME} uses GUI mode ${current}; changing it to ${requested} requires 'myCodex $(gui_option_for_mode "${requested}") up -d'"
+  fi
+}
+
+guard_reconcile_gui_mode() {
+  local current requested
+
+  container_exists || return 0
+  current="$(container_gui_mode)"
+
+  if [[ "${GUI_OPTION_SPECIFIED}" != 1 ]]; then
+    if [[ "${current}" != none ]]; then
+      die "container ${CONTAINER_NAME} uses GUI mode ${current}; repeat '--gui=${current}' to preserve it, or use '--no-gui' to remove GUI access"
+    fi
+    return 0
+  fi
+
+  requested="$(resolve_gui_mode)"
+  if [[ "${requested}" != "${current}" ]]; then
+    echo "myCodex: changing GUI mode ${current} -> ${requested}; Compose may replace the container and end its tmux session" >&2
+  fi
 }
 
 selected_image_exists() {
@@ -737,6 +993,7 @@ wait_for_container_ready() {
 }
 
 start_stack() {
+  prepare_gui
   if [[ ${#EXTRA_VOLUME_SPECS[@]} -gt 0 ]]; then
     compose_run config >/dev/null
   fi
@@ -759,6 +1016,9 @@ remove_state_volume() {
 
 run_up() {
   local -a args
+
+  guard_reconcile_gui_mode
+  prepare_gui
 
   if ! has_arg --build "$@" && ! has_pull_arg "$@"; then
     ensure_selected_image
@@ -793,6 +1053,9 @@ run_up() {
 run_create() {
   local -a args=("$@")
 
+  guard_reconcile_gui_mode
+  prepare_gui
+
   if ! has_arg --build "${args[@]}" && ! has_pull_arg "${args[@]}"; then
     ensure_selected_image
   fi
@@ -814,25 +1077,55 @@ run_pull() {
 }
 
 run_down() {
-  local remove_volumes
+  local gui_mode remove_volumes state_dir
 
   remove_volumes=0
+  gui_mode=none
+  if container_exists; then
+    gui_mode="$(container_gui_mode)"
+  fi
+  if [[ "${gui_mode}" == x11 ]]; then
+    state_dir="$(gui_state_directory)"
+  fi
   if has_volume_arg "$@"; then
     remove_volumes=1
   fi
 
   compose_without_state_volume_creation down "$@"
+  if [[ "${gui_mode}" == x11 ]]; then
+    rm -f -- "${state_dir}/xauthority"
+    rmdir -- "${state_dir}" 2>/dev/null || true
+  fi
   if [[ "${remove_volumes}" == "1" ]]; then
     remove_state_volume
   fi
 }
 
 run_default() {
+  local current_gui
+
   if ! is_running; then
-    ensure_selected_image
-    start_stack
-  elif [[ "${RECONCILE_REQUIRED}" == "1" ]]; then
-    start_stack
+    if container_exists \
+      && [[ "${GUI_OPTION_SPECIFIED}" != 1 ]] \
+      && [[ "$(container_gui_mode)" != none ]]; then
+      compose start "${SERVICE}"
+      wait_for_container_ready
+    else
+      guard_reconcile_gui_mode
+      prepare_gui
+      ensure_selected_image
+      start_stack
+    fi
+  else
+    current_gui="$(container_gui_mode)"
+    guard_attach_gui_mode
+    if [[ "${RECONCILE_REQUIRED}" == 1 ]]; then
+      if [[ "${current_gui}" != none && "${GUI_OPTION_SPECIFIED}" != 1 ]]; then
+        die "container ${CONTAINER_NAME} uses GUI mode ${current_gui}; repeat '--gui=${current_gui}' to preserve it during reconciliation"
+      fi
+      prepare_gui
+      start_stack
+    fi
   fi
 
   attach_with_update_check
@@ -843,9 +1136,19 @@ run_default() {
 # container. Values reflect the options given on the same command line (e.g.
 # --private-env changes the state volume name).
 print_info() {
-  local image_ref vol_state vol_created vol_mount
+  local image_ref vol_state vol_created vol_mount requested_gui running_gui
 
   image_ref="${IMAGE_NAME}:${IMAGE_TAG}"
+  if [[ "${GUI_OPTION_SPECIFIED}" == 1 ]]; then
+    requested_gui="$(resolve_gui_mode)"
+  else
+    requested_gui="not specified"
+  fi
+  if container_exists; then
+    running_gui="$(container_gui_mode)"
+  else
+    running_gui="no container"
+  fi
 
   if ! command -v docker >/dev/null 2>&1; then
     vol_state="docker not available"
@@ -863,6 +1166,8 @@ print_info() {
   printf '  tmux session      %s\n' "${SESSION}"
   printf '  auto attach       %s\n' "${AUTO_ATTACH}"
   printf '  image             %s\n' "${image_ref}"
+  printf '  GUI requested     %s\n' "${requested_gui}"
+  printf '  container GUI     %s\n' "${running_gui}"
   printf '  workspace (host)  %s\n' "${CALLER_DIR}"
   printf '  workdir (in ctr)  %s\n' "${CONTAINER_WORKDIR}"
   printf '  home (in ctr)     %s\n' "${CONTAINER_HOME}"
@@ -905,6 +1210,7 @@ case "${subcommand}" in
     usage
     ;;
   attach)
+    guard_attach_gui_mode
     attach_with_update_check
     ;;
   info)

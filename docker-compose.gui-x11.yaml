@@ -1,0 +1,20 @@
+services:
+  codex:
+    labels:
+      io.infrasecture.mycodex.gui: x11
+    environment:
+      DISPLAY: ${MYCODEX_X11_DISPLAY:?myCodex must provide the X11 display}
+      XAUTHORITY: /tmp/.mycodex-xauthority
+    volumes:
+      - type: bind
+        source: /tmp/.X11-unix
+        target: /tmp/.X11-unix
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${MYCODEX_X11_AUTHORITY:?myCodex must provide the Xauthority file}
+        target: /tmp/.mycodex-xauthority
+        read_only: true
+        bind:
+          create_host_path: false
