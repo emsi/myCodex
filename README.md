@@ -71,8 +71,10 @@ QEMU binfmt support. Separate native amd64 and arm64 builders do not need QEMU.
 
 For `myCodex pull`, immutable remote tag discovery uses the first available of
 `regctl`, `crane`, or `skopeo` with `jq`. Without one of those combinations, it
-falls back to the current Codex npm version using `curl` or `npm`, followed by
-Docker manifest verification of the corresponding moving version tag.
+reads the release labels from the registry's `latest` alias with Docker Buildx
+and verifies the corresponding immutable tag. If those labels are unavailable,
+it falls back to the current Codex npm version using `curl` or `npm`, followed
+by Docker manifest verification of the corresponding moving version tag.
 
 The launcher uses the first `bash` found through `PATH`. On macOS, the system
 Bash is too old; install current Bash and GNU coreutils with Homebrew and put

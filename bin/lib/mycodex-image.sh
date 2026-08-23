@@ -402,6 +402,41 @@ mycodex_remote_image_tag_exists() {
   return 1
 }
 
+mycodex_resolve_remote_alias_release_tag() {
+  local image_ref="$1"
+  local output version revision extra candidate release_tag=""
+
+  if output="$(
+    docker buildx imagetools inspect "${image_ref}" --format \
+      '{{printf "%s|%s\n" (index .Image.Config.Labels "io.infrasecture.mycodex.codex.version") (index .Image.Config.Labels "io.infrasecture.mycodex.image.revision")}}' \
+      2>/dev/null
+  )"; then
+    :
+  elif output="$(
+    docker buildx imagetools inspect "${image_ref}" --format \
+      '{{range $platform, $image := .Image}}{{printf "%s|%s\n" (index $image.Config.Labels "io.infrasecture.mycodex.codex.version") (index $image.Config.Labels "io.infrasecture.mycodex.image.revision")}}{{end}}' \
+      2>/dev/null
+  )"; then
+    :
+  else
+    return 1
+  fi
+
+  while IFS='|' read -r version revision extra; do
+    [[ -n "${version}" && -n "${revision}" && -z "${extra}" ]] || return 1
+    mycodex_validate_codex_version "${version}" >/dev/null 2>&1 || return 1
+    mycodex_validate_image_revision "${revision}" >/dev/null 2>&1 || return 1
+    candidate="$(mycodex_image_release_tag "${version}" "${revision}")" || return
+    if [[ -n "${release_tag}" && "${candidate}" != "${release_tag}" ]]; then
+      return 1
+    fi
+    release_tag="${candidate}"
+  done <<<"${output}"
+
+  [[ -n "${release_tag}" ]] || return 1
+  printf '%s\n' "${release_tag}"
+}
+
 mycodex_resolve_latest_local_image_tag() {
   local image_name="$1"
   local tags
@@ -423,13 +458,30 @@ mycodex_resolve_latest_local_image_tag() {
 mycodex_resolve_latest_remote_image_tag() {
   local image_name="$1"
   local tags
-  local latest_tag
+  local latest_tag latest_codex_version image_codex_version probe_status
 
   if tags="$(mycodex_list_remote_image_tags "${image_name}" 2>/dev/null)"; then
     latest_tag="$(printf '%s\n' "${tags}" | mycodex_latest_semver_from_tags)"
     if [[ -n "${latest_tag}" ]]; then
       printf '%s\n' "${latest_tag}"
       return
+    fi
+  fi
+
+  if latest_tag="$(mycodex_resolve_remote_alias_release_tag "${image_name}:latest")"; then
+    if mycodex_registry_ref_exists "${image_name}:${latest_tag}"; then
+      image_codex_version="${latest_tag%-r*}"
+      if latest_codex_version="$(mycodex_resolve_latest_codex_version 2>/dev/null)" \
+        && [[ "$(mycodex_compare_semver \
+          "${image_codex_version}" "${latest_codex_version}")" == -1 ]]; then
+        echo "WARNING: Codex ${latest_codex_version} does not have a published workstation image yet." >&2
+        echo "Using latest published image: ${image_name}:${latest_tag}" >&2
+      fi
+      printf '%s\n' "${latest_tag}"
+      return
+    else
+      probe_status=$?
+      [[ "${probe_status}" -eq 1 ]] || return "${probe_status}"
     fi
   fi
 
