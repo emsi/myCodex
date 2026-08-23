@@ -29,6 +29,7 @@ set -euo pipefail
 case "${1:-} ${2:-}" in
   "volume inspect") exit 1 ;;
   "volume create") printf '%s\n' "${3}" ;;
+  "image inspect") exit 0 ;;
   *) printf 'unexpected fake docker invocation: %s\n' "$*" >&2; exit 1 ;;
 esac
 EOF
@@ -91,7 +92,7 @@ MYCODEX_STATE_VOLUME_NAME="custom-state" \
 MYCODEX_IMAGE_TAG="0.146.0-r2" \
 MYCODEX_COMPOSE="${fake_bin}/compose" \
   run_launcher up -d
-assert_contains "${FAKE_COMPOSE_LOG}" "args=-p sample-project -f ${PROJECT_ROOT}/docker-compose.yaml up --no-build -d"
+assert_contains "${FAKE_COMPOSE_LOG}" "args=-p sample-project -f ${PROJECT_ROOT}/docker-compose.yaml up --pull never --no-build -d"
 assert_contains "${FAKE_COMPOSE_LOG}" "container=custom-container"
 assert_contains "${FAKE_COMPOSE_LOG}" "session=review"
 assert_contains "${FAKE_COMPOSE_LOG}" "auto_attach=1"

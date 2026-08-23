@@ -52,9 +52,9 @@ Runtime requirements:
 - Docker configured for Linux containers, including VM-backed Docker on macOS;
 - Docker Compose v2;
 - Bash 4.4 or newer;
-- GNU-compatible `realpath -m` and `sort -V` behavior. Linux coreutils normally
-  provides both. On macOS, install GNU coreutils and put its `gnubin` directory
-  before the system utilities on `PATH`.
+- GNU-compatible `realpath -m` behavior. Linux coreutils normally provides it.
+  On macOS, install GNU coreutils and put its `gnubin` directory before the
+  system utilities on `PATH`.
 
 Image build requirements:
 
@@ -68,13 +68,6 @@ Image build requirements:
 Publishing additionally requires registry credentials with push access. A
 single Linux host building non-native architectures through `--release` needs
 QEMU binfmt support. Separate native amd64 and arm64 builders do not need QEMU.
-
-For `myCodex pull`, immutable remote tag discovery uses the first available of
-`regctl`, `crane`, or `skopeo` with `jq`. Without one of those combinations, it
-reads the release labels from the registry's `latest` alias with Docker Buildx
-and verifies the corresponding immutable tag. If those labels are unavailable,
-it falls back to the current Codex npm version using `curl` or `npm`, followed
-by Docker manifest verification of the corresponding moving version tag.
 
 The launcher uses the first `bash` found through `PATH`. On macOS, the system
 Bash is too old; install current Bash and GNU coreutils with Homebrew and put
@@ -99,12 +92,6 @@ git clone https://github.com/emsi/myCodex.git
 cd myCodex
 ```
 
-Build the image:
-
-```bash
-./bin/build-codex-image.sh
-```
-
 Start a workstation for the current directory:
 
 ```bash
@@ -119,8 +106,10 @@ cd project
 myCodex
 ```
 
-The launcher starts the container if needed, waits for the tmux session to be
-ready, and attaches to it.
+The launcher pulls the published `latest` image when it is not already local,
+starts the container if needed, waits for the tmux session to be ready, and
+attaches to it. Building locally is optional and documented under
+[Image Builds](#image-builds).
 
 ## Usage
 
@@ -156,10 +145,11 @@ container's image by itself. Use `MYCODEX_IMAGE_NAME` as well when selecting an
 image from a different repository. When running from this checkout rather than
 an installed command, replace `myCodex` with `./bin/myCodex`.
 
-Return to automatic selection of the latest local immutable release with:
+Return to the published `latest` image with:
 
 ```bash
 unset MYCODEX_IMAGE_TAG
+myCodex pull
 myCodex up -d
 ```
 
@@ -269,11 +259,21 @@ portable fallback is tracked in [issue #6](https://github.com/emsi/myCodex/issue
 
 ### Image Resolution
 
-Ordinary startup inspects local Docker tags and selects the latest local
-immutable revision-qualified release unless `MYCODEX_IMAGE_TAG` is set. It does
-not query registries for updates. `myCodex pull` performs the remote discovery
-described in Requirements and pulls the selected image. The explicit image
-workflow is documented under [Run a Specific Image Release](#run-a-specific-image-release).
+Ordinary startup uses `MYCODEX_IMAGE_TAG` when set and `latest` otherwise. If no
+container is running, the launcher pulls the exact selected reference only when
+it is absent locally, then starts with `--no-build --pull never`. A running
+container is never replaced merely because the remote `latest` tag moved.
+`myCodex pull` only pulls the selected Compose service; use `myCodex up -d`
+explicitly to apply a pulled image.
+
+Before an interactive attach, the launcher compares the running Codex version
+with the selected local image's version and performs a short, best-effort check
+for a newer upstream Codex release. It reports when a local image is ready to
+apply and distinguishes that from an upstream release that is not yet local.
+Image revision suffixes such as `-r2` remain part of the selected tag; version
+comparison uses the image's dedicated Codex-version label. The check is
+informational, and failure or an offline registry never blocks attachment. Set
+`MYCODEX_UPDATE_CHECK=0` to disable it.
 
 ### Direct Compose Guard
 
@@ -433,7 +433,8 @@ run the newly built version without a registry pull.
 | `MYCODEX_COMPOSE` | `docker compose` | Orchestrator command invoked for all Compose operations. Override to wrap Compose without forking `myCodex`, e.g. `vaka --vaka-file=/path/vaka.yaml compose` to enforce an egress policy. Word-split into argv, so paths in it must not contain spaces. |
 | `MYCODEX_STATE_VOLUME_NAME` | `codex_state` | Shared/custom Docker volume mounted as the runtime home. `--private-env` takes precedence and uses `<project>_codex_state`. |
 | `MYCODEX_IMAGE_NAME` | `ghcr.io/infrasecture/harness-workstation` | Image name used by build and runtime helpers. |
-| `MYCODEX_IMAGE_TAG` | latest local revision-qualified release | Runtime image tag. Legacy unqualified SemVer tags remain a discovery fallback; set `latest` explicitly to opt into mutable-tag behavior. |
+| `MYCODEX_IMAGE_TAG` | `latest` | Runtime image tag. Set an immutable revision-qualified release to pin a workstation image. |
+| `MYCODEX_UPDATE_CHECK` | `1` | Before interactive attach, report a newer upstream Codex version when one can be determined quickly. Set to `0` to disable. |
 | `MYCODEX_CONTAINER_HOME` | host `$HOME` via `myCodex` | Runtime home path mounted from the persistent state volume. |
 | `MYCODEX_WORKDIR` | current directory via `myCodex` | Container workdir and workspace bind target. |
 
