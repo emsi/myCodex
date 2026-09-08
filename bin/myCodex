@@ -95,7 +95,13 @@ AUTO_ATTACH="${CODEX_AUTO_ATTACH:-0}"
 WAIT_TIMEOUT_SECONDS="${MYCODEX_WAIT_TIMEOUT_SECONDS:-30}"
 STARTUP_PROGRESS_INTERVAL_SECONDS="${MYCODEX_STARTUP_PROGRESS_INTERVAL_SECONDS:-2}"
 IMAGE_NAME="${MYCODEX_IMAGE_NAME:-${MYCODEX_DEFAULT_IMAGE_NAME}}"
-IMAGE_TAG="${MYCODEX_IMAGE_TAG:-latest}"
+IMAGE_TAG_EXPLICIT=0
+if [[ -n "${MYCODEX_IMAGE_TAG:-}" ]]; then
+  IMAGE_TAG="${MYCODEX_IMAGE_TAG}"
+  IMAGE_TAG_EXPLICIT=1
+else
+  IMAGE_TAG="latest"
+fi
 UPDATE_CHECK="${MYCODEX_UPDATE_CHECK:-1}"
 HOST_UID="$(id -u)"
 HOST_GID="$(id -g)"
@@ -806,6 +812,61 @@ selected_image_exists() {
   docker image inspect "${IMAGE_NAME}:${IMAGE_TAG}" >/dev/null 2>&1
 }
 
+image_id_for_reference() {
+  docker image inspect --format '{{.Id}}' "$1" 2>/dev/null
+}
+
+select_immutable_image() {
+  local image_id="$1"
+  local metadata codex_version image_revision release_tag release_ref existing_id
+
+  if ! metadata="$(
+    docker image inspect \
+      --format '{{index .Config.Labels "io.infrasecture.mycodex.codex.version"}}|{{index .Config.Labels "io.infrasecture.mycodex.image.revision"}}' \
+      "${image_id}" 2>/dev/null
+  )"; then
+    die "cannot inspect selected image ${image_id}"
+  fi
+  IFS='|' read -r codex_version image_revision <<<"${metadata}"
+  if ! mycodex_validate_codex_version "${codex_version}" >/dev/null 2>&1 \
+    || ! mycodex_validate_image_revision "${image_revision}" >/dev/null 2>&1; then
+    die "image ${image_id} lacks valid Codex version and image revision labels; set MYCODEX_IMAGE_TAG to an immutable tag explicitly"
+  fi
+
+  release_tag="$(mycodex_image_release_tag "${codex_version}" "${image_revision}")"
+  release_ref="${IMAGE_NAME}:${release_tag}"
+  if existing_id="$(image_id_for_reference "${release_ref}")"; then
+    if [[ "${existing_id}" != "${image_id}" ]]; then
+      die "immutable tag collision: ${release_ref} points to ${existing_id}, not ${image_id}"
+    fi
+  else
+    docker image tag "${image_id}" "${release_ref}"
+    echo "myCodex: tagged selected image as ${release_ref}" >&2
+  fi
+  IMAGE_TAG="${release_tag}"
+}
+
+select_image_reference_immutably() {
+  local image_ref="$1"
+  local image_id
+
+  if ! image_id="$(image_id_for_reference "${image_ref}")"; then
+    die "selected image is unavailable locally: ${image_ref}"
+  fi
+  select_immutable_image "${image_id}"
+}
+
+select_container_image_immutably() {
+  local image_id
+
+  if ! image_id="$(
+    docker inspect --format '{{.Image}}' "${CONTAINER_NAME}" 2>/dev/null
+  )" || [[ -z "${image_id}" ]]; then
+    die "cannot identify the image used by container ${CONTAINER_NAME}"
+  fi
+  select_immutable_image "${image_id}"
+}
+
 selected_image_codex_version() {
   docker image inspect \
     --format '{{index .Config.Labels "io.infrasecture.mycodex.codex.version"}}' \
@@ -821,6 +882,44 @@ ensure_selected_image() {
   compose_without_state_volume_creation pull "${SERVICE}"
   if ! selected_image_exists; then
     die "pull completed but selected image is still unavailable: ${IMAGE_NAME}:${IMAGE_TAG}"
+  fi
+}
+
+require_selected_image() {
+  if ! selected_image_exists; then
+    die "selected image is unavailable locally: ${IMAGE_NAME}:${IMAGE_TAG}; run 'myCodex pull' first"
+  fi
+}
+
+prepare_default_image_for_new_container() {
+  local latest_ref="${IMAGE_NAME}:latest"
+
+  IMAGE_TAG=latest
+  echo "myCodex: checking for the latest published image" >&2
+  if ! compose_without_state_volume_creation pull "${SERVICE}"; then
+    if ! selected_image_exists; then
+      die "could not pull ${latest_ref}, and no local latest image is available"
+    fi
+    echo "myCodex: warning: pull failed; using the existing local ${latest_ref}" >&2
+  fi
+  select_image_reference_immutably "${latest_ref}"
+}
+
+prepare_image_for_new_container() {
+  if [[ "${IMAGE_TAG_EXPLICIT}" == 1 ]]; then
+    ensure_selected_image
+  else
+    prepare_default_image_for_new_container
+  fi
+}
+
+prepare_image_for_reconcile() {
+  if [[ "${IMAGE_TAG_EXPLICIT}" == 1 ]]; then
+    require_selected_image
+  elif container_exists; then
+    select_image_reference_immutably "${IMAGE_NAME}:latest"
+  else
+    prepare_default_image_for_new_container
   fi
 }
 
@@ -880,7 +979,7 @@ notify_newer_codex() {
 
   if [[ "${selected_update_available}" == 1 ]]; then
     echo "myCodex: Codex ${latest_version} is available upstream, newer than the selected local image's ${selected_version}." >&2
-    if [[ "${IMAGE_TAG}" == latest ]]; then
+    if [[ "${IMAGE_TAG_EXPLICIT}" != 1 ]]; then
       echo "myCodex: Run 'myCodex pull' to refresh it; pulling does not recreate this container." >&2
     else
       echo "myCodex: MYCODEX_IMAGE_TAG=${IMAGE_TAG} pins this image; select a newer tag to update it." >&2
@@ -891,14 +990,14 @@ notify_newer_codex() {
   echo "myCodex: Codex ${latest_version} is available upstream; this container runs ${current_version}." >&2
   if [[ -n "${selected_version}" ]]; then
     echo "myCodex: The selected local image contains Codex ${selected_version}." >&2
-    if [[ "${IMAGE_TAG}" == latest ]]; then
+    if [[ "${IMAGE_TAG_EXPLICIT}" != 1 ]]; then
       echo "myCodex: Run 'myCodex pull' to refresh it; pulling does not recreate this container." >&2
     else
       echo "myCodex: MYCODEX_IMAGE_TAG=${IMAGE_TAG} pins this image; select a newer tag to update it." >&2
     fi
   else
     echo "myCodex: A matching workstation image is not available locally." >&2
-    if [[ "${IMAGE_TAG}" == latest ]]; then
+    if [[ "${IMAGE_TAG_EXPLICIT}" != 1 ]]; then
       echo "myCodex: Run 'myCodex pull' to fetch the latest published image." >&2
     else
       echo "myCodex: MYCODEX_IMAGE_TAG=${IMAGE_TAG} pins the selected image." >&2
@@ -1025,7 +1124,7 @@ run_up() {
   prepare_gui
 
   if ! has_arg --build "$@" && ! has_pull_arg "$@"; then
-    ensure_selected_image
+    prepare_image_for_reconcile
   fi
 
   if has_arg --wait "$@"; then
@@ -1061,7 +1160,7 @@ run_create() {
   prepare_gui
 
   if ! has_arg --build "${args[@]}" && ! has_pull_arg "${args[@]}"; then
-    ensure_selected_image
+    prepare_image_for_new_container
   fi
   if ! has_arg --build "${args[@]}" && ! has_arg --no-build "${args[@]}"; then
     args=(--no-build "${args[@]}")
@@ -1073,10 +1172,18 @@ run_create() {
 }
 
 run_pull() {
+  if [[ "${IMAGE_TAG_EXPLICIT}" != 1 ]]; then
+    IMAGE_TAG=latest
+  fi
+
   if [[ $# -eq 0 ]]; then
     compose_without_state_volume_creation pull "${SERVICE}"
   else
     compose_without_state_volume_creation pull "$@"
+  fi
+
+  if [[ "${IMAGE_TAG_EXPLICIT}" != 1 ]]; then
+    select_image_reference_immutably "${IMAGE_NAME}:latest"
   fi
 }
 
@@ -1108,28 +1215,34 @@ run_down() {
 run_default() {
   local current_gui
 
-  if ! is_running; then
-    if container_exists \
-      && [[ "${GUI_OPTION_SPECIFIED}" != 1 ]] \
-      && [[ "$(container_gui_mode)" != none ]]; then
-      compose start "${SERVICE}"
-      wait_for_container_ready
-    else
-      guard_reconcile_gui_mode
-      prepare_gui
-      ensure_selected_image
-      start_stack
-    fi
-  else
+  if container_exists; then
     current_gui="$(container_gui_mode)"
     guard_attach_gui_mode
-    if [[ "${RECONCILE_REQUIRED}" == 1 ]]; then
+    if ! is_running; then
+      if [[ "${RECONCILE_REQUIRED}" != 1 ]]; then
+        compose start "${SERVICE}"
+        wait_for_container_ready
+      else
+        if [[ "${current_gui}" != none && "${GUI_OPTION_SPECIFIED}" != 1 ]]; then
+          die "container ${CONTAINER_NAME} uses GUI mode ${current_gui}; repeat '--gui=${current_gui}' to preserve it during reconciliation"
+        fi
+        prepare_gui
+        select_container_image_immutably
+        start_stack
+      fi
+    elif [[ "${RECONCILE_REQUIRED}" == 1 ]]; then
       if [[ "${current_gui}" != none && "${GUI_OPTION_SPECIFIED}" != 1 ]]; then
         die "container ${CONTAINER_NAME} uses GUI mode ${current_gui}; repeat '--gui=${current_gui}' to preserve it during reconciliation"
       fi
       prepare_gui
+      select_container_image_immutably
       start_stack
     fi
+  else
+    guard_reconcile_gui_mode
+    prepare_gui
+    prepare_image_for_new_container
+    start_stack
   fi
 
   attach_with_update_check

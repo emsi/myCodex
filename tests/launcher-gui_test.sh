@@ -79,7 +79,17 @@ printf 'docker %s\n' "$*" >>"${FAKE_DOCKER_LOG}"
 case "${1:-} ${2:-}" in
   "volume inspect") exit 0 ;;
   "volume create") exit 0 ;;
-  "image inspect") exit 0 ;;
+  "image inspect")
+    if [[ "${3:-}" == --format ]]; then
+      case "$4" in
+        '{{.Id}}') printf 'sha256:gui-test-image\n' ;;
+        *mycodex.image.revision*) printf '0.153.4|1\n' ;;
+        *mycodex.codex.version*) printf '0.153.4\n' ;;
+        *) exit 1 ;;
+      esac
+    fi
+    ;;
+  "image tag") exit 0 ;;
   "inspect --format")
     [[ "${FAKE_CONTAINER_EXISTS:-0}" == 1 ]] || exit 1
     case "$3" in

@@ -106,10 +106,11 @@ cd project
 myCodex
 ```
 
-The launcher pulls the published `latest` image when it is not already local,
-starts the container if needed, waits for the tmux session to be ready, and
-attaches to it. Building locally is optional and documented under
-[Image Builds](#image-builds).
+For a new project, the launcher checks for the published `latest` image and
+starts the resolved immutable release. For an existing project, it starts or
+attaches to the existing container without changing its image. It then waits
+for the tmux session to be ready and attaches to it. Building locally is
+optional and documented under [Image Builds](#image-builds).
 
 ## Usage
 
@@ -316,12 +317,26 @@ portable fallback is tracked in [issue #6](https://github.com/emsi/myCodex/issue
 
 ### Image Resolution
 
-Ordinary startup uses `MYCODEX_IMAGE_TAG` when set and `latest` otherwise. If no
-container is running, the launcher pulls the exact selected reference only when
-it is absent locally, then starts with `--no-build --pull never`. A running
-container is never replaced merely because the remote `latest` tag moved.
-`myCodex pull` only pulls the selected Compose service; use `myCodex up -d`
-explicitly to apply a pulled image.
+`MYCODEX_IMAGE_TAG` remains an explicit image selection. Without it, ordinary
+startup treats `latest` as discovery rather than as the container's runtime
+reference. A new project attempts to pull `latest` even when a local copy
+exists, falls back to that local copy if the registry is temporarily
+unavailable, and reads the image's Codex-version and image-revision labels. It
+then verifies or creates the matching immutable `version-rN` tag and starts
+Compose with that tag and `--pull never`.
+
+An existing container does not use `latest` to select or replace its image
+during ordinary startup. If it is running, the launcher attaches; if it is
+stopped, the launcher uses `docker compose start`. A bare invocation that must
+reconcile other requested configuration first resolves the existing
+container's image ID back to its immutable release tag, so that reconciliation
+cannot silently upgrade it.
+
+`myCodex pull` refreshes `latest` and verifies or creates its immutable local
+release tag, but never recreates a container. For an existing project,
+`myCodex up -d` applies the currently selected local image without an implicit
+pull; use the two commands in that order when updating it. An invalid release
+label or a conflicting immutable tag is reported instead of being overwritten.
 
 Before an interactive attach, the launcher compares the running Codex version
 with the selected local image's version and performs a short, best-effort check
@@ -490,7 +505,7 @@ run the newly built version without a registry pull.
 | `MYCODEX_COMPOSE` | `docker compose` | Orchestrator command invoked for all Compose operations. Override to wrap Compose without forking `myCodex`, e.g. `vaka --vaka-file=/path/vaka.yaml compose` to enforce an egress policy. Word-split into argv, so paths in it must not contain spaces. |
 | `MYCODEX_STATE_VOLUME_NAME` | `codex_state` | Shared/custom Docker volume mounted as the runtime home. `--private-env` takes precedence and uses `<project>_codex_state`. |
 | `MYCODEX_IMAGE_NAME` | `ghcr.io/infrasecture/harness-workstation` | Image name used by build and runtime helpers. |
-| `MYCODEX_IMAGE_TAG` | `latest` | Runtime image tag. Set an immutable revision-qualified release to pin a workstation image. |
+| `MYCODEX_IMAGE_TAG` | unset (`latest` discovery) | Explicit runtime image tag. When unset, new containers discover `latest` and run its immutable revision-qualified release tag. |
 | `MYCODEX_UPDATE_CHECK` | `1` | Before interactive attach, report a newer upstream Codex version when one can be determined quickly. Set to `0` to disable. |
 | `MYCODEX_CONTAINER_HOME` | host `$HOME` via `myCodex` | Runtime home path mounted from the persistent state volume. |
 | `MYCODEX_WORKDIR` | current directory via `myCodex` | Container workdir and workspace bind target. |
