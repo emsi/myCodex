@@ -264,6 +264,13 @@ assert_contains "${FAKE_COMPOSE_LOG}" "pull codex"
 assert_not_contains "${FAKE_COMPOSE_LOG}" " up "
 assert_not_contains "${FAKE_DOCKER_LOG}" "volume create"
 
+reset_state
+FAKE_RUNNING=1 MYCODEX_STATE_VOLUME_NAME=custom-state MYCODEX_UPDATE_CHECK=0 \
+  run_launcher >"${tmp_dir}/custom-state-running.out" 2>&1
+assert_contains "${FAKE_COMPOSE_LOG}" "exec -it codex"
+assert_not_contains "${FAKE_COMPOSE_LOG}" " up "
+assert_not_contains "${FAKE_COMPOSE_LOG}" " pull "
+
 # A stopped container can be replaced only when its complete configuration is
 # reproducible. Covers old images with the same Codex version but new revisions.
 reset_state

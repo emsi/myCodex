@@ -380,6 +380,8 @@ unverifiable configuration (for example omitted `-v` or `-f` options) keeps the
 original container and reports how to apply the update explicitly. `myCodex
 start` always starts the original container without refreshing or replacing it.
 A running container is never pulled or replaced merely because `latest` moved.
+Persistent environment settings (such as a custom state volume or session name)
+do not request recreation on each attach; use `up` to apply changed defaults.
 `myCodex pull` only pulls the selected Compose service; use `myCodex up -d`
 explicitly to apply a pulled image to a running container.
 

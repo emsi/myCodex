@@ -413,12 +413,9 @@ if [[ "${PRIVATE_ENV}" == "1" ]]; then
   STATE_VOLUME_KIND="per-project"
 fi
 
-if [[ "${CONTAINER_NAME}" != "${DEFAULT_CONTAINER_NAME}" ]] \
-  || [[ "${STATE_VOLUME_NAME}" != "codex_state" ]] \
-  || [[ "${SESSION}" != "codex" ]] \
-  || [[ "${AUTO_ATTACH}" != 0 ]]; then
-  RECONCILE_REQUIRED=1
-fi
+# Persistent environment settings select defaults; they are not a request to
+# recreate a container on every attach. Use `up` to apply changed defaults.
+# Only explicit command-line configuration options request reconciliation here.
 
 ensure_state_volume() {
   if ! docker volume inspect "${STATE_VOLUME_NAME}" >/dev/null 2>&1; then
