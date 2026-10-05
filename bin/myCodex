@@ -137,7 +137,7 @@ Usage:
 
 Options:
   --private-env                      Use a per-project Codex state volume
-  --gui[=auto|x11|wayland]           Explicitly enable local GUI access
+  --gui[=auto|x11|wayland]            Require local GUI access (new containers auto-detect by default)
   --no-gui                           Explicitly select headless operation
   -v, --volume <spec>                Add an extra Docker-style volume mount
   -f, --compose-file <path>          Add an extra Compose override file
@@ -251,6 +251,8 @@ GUI_X11_AUTHORITY=""
 GUI_X11_SOCKET=""
 GUI_WAYLAND_SOCKET=""
 GUI_TEMP_FILE=""
+GUI_REASON=""
+GUI_X11_CREDENTIALS=""
 HOST_GROUPS="$(host_group_specs)"
 
 cleanup() {
@@ -447,7 +449,7 @@ x11_socket_for_display() {
 
   display_number="${BASH_REMATCH[1]}"
   socket="/tmp/.X11-unix/X${display_number}"
-  [[ -S "${socket}" ]] || return 1
+  [[ -S "${socket}" && -w "${socket}" ]] || return 1
   printf '%s\n' "${socket}"
 }
 
@@ -467,81 +469,122 @@ wayland_socket_for_display() {
       ;;
   esac
 
-  [[ -S "${socket}" ]] || return 1
+  [[ -S "${socket}" && -w "${socket}" ]] || return 1
   printf '%s\n' "${socket}"
 }
 
-resolve_gui_mode() {
-  local wayland_socket
+local_gui_daemon() {
+  local endpoint context daemon_os
 
+  # A client-side socket cannot be bind-mounted by a remote daemon. Respect
+  # Docker's context-over-host precedence, including renamed contexts.
+  if [[ -n "${DOCKER_CONTEXT:-}" ]]; then
+    context="${DOCKER_CONTEXT}"
+  elif [[ -n "${DOCKER_HOST:-}" ]]; then
+    endpoint="${DOCKER_HOST}"
+  else
+    context="$(docker context show 2>/dev/null)" || return 1
+  fi
+  if [[ -n "${context:-}" ]]; then
+    endpoint="$(docker context inspect "${context}" --format '{{.Endpoints.docker.Host}}' 2>/dev/null)" || return 1
+  fi
+  [[ "${endpoint:-}" == unix:///* ]] || return 1
+  daemon_os="$(docker info --format '{{.OperatingSystem}}' 2>/dev/null)" || return 1
+  [[ -n "${daemon_os}" && "${daemon_os}" != *'Docker Desktop'* ]]
+}
+
+# Read-only preflight. Socket discovery does not prove clipboard protocol
+# support; GUI_MODE describes the access we can configure, not clipboard health.
+detect_gui_mode() {
+  local request="${GUI_REQUEST:-auto}"
+
+  GUI_MODE=none
+  GUI_REASON="no usable local Wayland or X11 display"
+  GUI_X11_CREDENTIALS=""
+  if [[ "${request}" == none ]]; then
+    GUI_REASON="disabled explicitly"
+    return
+  fi
+  if [[ -z "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ]]; then
+    return
+  fi
+  if [[ "$(uname -s)" != Linux ]]; then
+    GUI_REASON="desktop forwarding supports native Linux Docker only"
+    return
+  fi
+  if [[ "${GUI_OPTION_SPECIFIED}" != 1 && -n "${SSH_CONNECTION:-}${SSH_CLIENT:-}${SSH_TTY:-}" ]]; then
+    GUI_REASON="automatic desktop forwarding is disabled over SSH; use --gui for a server-local display"
+    return
+  fi
+  if ! local_gui_daemon; then
+    GUI_REASON="desktop forwarding requires a verified local Docker Engine (remote daemons and Docker Desktop are unsupported)"
+    return
+  fi
+
+  if [[ "${request}" != x11 ]] && GUI_WAYLAND_SOCKET="$(wayland_socket_for_display)"; then
+    GUI_MODE=wayland
+    GUI_REASON="local Wayland socket available"
+    return
+  fi
+  if [[ "${request}" == wayland ]]; then
+    GUI_REASON="--gui=wayland requires a writable WAYLAND_DISPLAY socket"
+    return
+  fi
+  if ! GUI_X11_SOCKET="$(x11_socket_for_display)"; then
+    return
+  fi
+  if ! command -v xauth >/dev/null 2>&1; then
+    GUI_REASON="X11 detected but the host xauth command is unavailable"
+    return
+  fi
+  if ! GUI_X11_CREDENTIALS="$(xauth nlist "${DISPLAY}" 2>/dev/null)" || [[ -z "${GUI_X11_CREDENTIALS}" ]]; then
+    GUI_REASON="X11 detected but xauth cannot read credentials for the active display"
+    return
+  fi
+  GUI_MODE=x11
+  GUI_REASON="local X11 socket and credentials available"
+}
+
+resolve_gui_mode() {
   if [[ -n "${GUI_MODE}" ]]; then
     printf '%s\n' "${GUI_MODE}"
     return
   fi
 
-  case "${GUI_REQUEST:-none}" in
-    none|'')
-      GUI_MODE=none
-      ;;
-    x11)
-      if ! GUI_X11_SOCKET="$(x11_socket_for_display)"; then
-        die "--gui=x11 requires a local Unix DISPLAY and its /tmp/.X11-unix socket; DISPLAY=${DISPLAY:-<unset>}"
-      fi
-      GUI_MODE=x11
-      ;;
-    wayland)
-      if ! wayland_socket="$(wayland_socket_for_display)"; then
-        die "--gui=wayland requires an active WAYLAND_DISPLAY socket under XDG_RUNTIME_DIR"
-      fi
-      GUI_WAYLAND_SOCKET="${wayland_socket}"
-      GUI_MODE=wayland
-      ;;
-    auto)
-      if wayland_socket="$(wayland_socket_for_display)"; then
-        GUI_WAYLAND_SOCKET="${wayland_socket}"
-        GUI_MODE=wayland
-      elif GUI_X11_SOCKET="$(x11_socket_for_display)"; then
-        GUI_MODE=x11
-      else
-        die "--gui could not find a usable local Wayland or X11 display"
-      fi
-      ;;
-  esac
-
+  detect_gui_mode
+  if [[ "${GUI_OPTION_SPECIFIED}" == 1 && "${GUI_REQUEST}" != none && "${GUI_MODE}" == none ]]; then
+    die "--gui unavailable: ${GUI_REASON}"
+  fi
   printf '%s\n' "${GUI_MODE}"
 }
 
 prepare_x11_authority() {
-  local gui_state_dir xauth_output
+  local gui_state_dir
 
-  command -v xauth >/dev/null 2>&1 \
-    || die "--gui=x11 requires the host xauth command"
-
-  gui_state_dir="$(gui_state_directory)"
-  mkdir -p -- "${gui_state_dir}"
-  chmod 700 -- "${gui_state_dir}"
+  GUI_REASON="could not prepare the private X11 authorization file"
+  gui_state_dir="$(gui_state_directory)" || return 1
+  mkdir -p -- "${gui_state_dir}" && chmod 700 -- "${gui_state_dir}" || return 1
   GUI_X11_AUTHORITY="${gui_state_dir}/xauthority"
-  GUI_TEMP_FILE="$(mktemp "${gui_state_dir}/xauthority.XXXXXX")"
-  chmod 600 -- "${GUI_TEMP_FILE}"
+  GUI_TEMP_FILE="$(mktemp "${gui_state_dir}/xauthority.XXXXXX")" || return 1
+  chmod 600 -- "${GUI_TEMP_FILE}" || return 1
 
-  if ! xauth_output="$(xauth nlist "${DISPLAY}" 2>/dev/null)" \
-    || [[ -z "${xauth_output}" ]] \
-    || ! printf '%s\n' "${xauth_output}" \
+  if ! printf '%s\n' "${GUI_X11_CREDENTIALS}" \
       | sed -e 's/^..../ffff/' \
       | xauth -f "${GUI_TEMP_FILE}" nmerge - >/dev/null 2>&1 \
     || [[ ! -s "${GUI_TEMP_FILE}" ]]; then
-    die "could not copy X11 credentials for DISPLAY=${DISPLAY}; check that xauth can read the active display"
+    return 1
   fi
 
   if [[ -f "${GUI_X11_AUTHORITY}" ]]; then
-    cp -- "${GUI_TEMP_FILE}" "${GUI_X11_AUTHORITY}"
-    rm -f -- "${GUI_TEMP_FILE}"
+    cp -- "${GUI_TEMP_FILE}" "${GUI_X11_AUTHORITY}" && rm -f -- "${GUI_TEMP_FILE}" || return 1
   else
-    mv -- "${GUI_TEMP_FILE}" "${GUI_X11_AUTHORITY}"
+    mv -- "${GUI_TEMP_FILE}" "${GUI_X11_AUTHORITY}" || return 1
   fi
   GUI_TEMP_FILE=""
-  chmod 600 -- "${GUI_X11_AUTHORITY}"
+  chmod 600 -- "${GUI_X11_AUTHORITY}" || return 1
   GUI_X11_DISPLAY="${DISPLAY}"
+  GUI_X11_CREDENTIALS=""
+  GUI_REASON="local X11 socket and credentials available"
 }
 
 gui_state_directory() {
@@ -565,21 +608,38 @@ gui_option_for_mode() {
 }
 
 prepare_gui() {
-  resolve_gui_mode >/dev/null
-
-  if [[ -n "${GUI_COMPOSE_FILE}" || "${GUI_MODE}" == none ]]; then
+  # Only creation/reconciliation calls this function. An omitted flag must not
+  # change the mode of an established container, even during an explicit up.
+  if [[ "${GUI_OPTION_SPECIFIED}" != 1 ]] && container_exists; then
+    GUI_MODE=none
     return
   fi
+  [[ -z "${GUI_COMPOSE_FILE}" ]] || return 0
+  resolve_gui_mode >/dev/null
 
   case "${GUI_MODE}" in
     x11)
-      prepare_x11_authority
-      GUI_COMPOSE_FILE="${GUI_X11_COMPOSE_FILE}"
+      if prepare_x11_authority; then
+        GUI_COMPOSE_FILE="${GUI_X11_COMPOSE_FILE}"
+      elif [[ "${GUI_OPTION_SPECIFIED}" == 1 ]]; then
+        die "${GUI_REASON}"
+      else
+        GUI_MODE=none
+        [[ -z "${GUI_TEMP_FILE}" ]] || rm -f -- "${GUI_TEMP_FILE}"
+        GUI_TEMP_FILE=""
+        GUI_X11_CREDENTIALS=""
+      fi
       ;;
     wayland)
       GUI_COMPOSE_FILE="${GUI_WAYLAND_COMPOSE_FILE}"
       ;;
   esac
+  if [[ "${GUI_MODE}" != none ]]; then
+    echo "myCodex: enabling GUI access (${GUI_MODE}); this container will have access to your desktop session." >&2
+    echo "myCodex: Use --no-gui when creating a container to disable desktop access." >&2
+  elif [[ "${GUI_OPTION_SPECIFIED}" != 1 && -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]]; then
+    echo "myCodex: starting headless: ${GUI_REASON}." >&2
+  fi
 }
 
 has_arg() {
@@ -731,14 +791,12 @@ run_docker_compose() {
 compose_run() {
   ensure_state_volume
   ensure_extra_volumes_override
-  prepare_gui
   run_docker_compose "$@"
 }
 
 compose() {
   ensure_state_volume
   ensure_extra_volumes_override
-  prepare_gui
   run_docker_compose "$@"
 }
 
@@ -912,13 +970,29 @@ attach_with_update_check() {
 }
 
 attach_tmux() {
+  local mode notice
+
+  mode="$(container_gui_mode)"
+  case "${mode}" in
+    x11) notice="GUI access enabled: X11" ;;
+    wayland) notice="GUI access enabled: Wayland" ;;
+    none)
+      notice="GUI access disabled (headless)"
+      if [[ "${GUI_OPTION_SPECIFIED}" != 1 && "$(resolve_gui_mode)" != none ]]; then
+        notice="GUI off; desktop detected. Enable: myCodex --gui up -d (ends this session)"
+      fi
+      ;;
+    *) mode=unknown; notice="GUI access: unknown container configuration" ;;
+  esac
+  echo "myCodex: ${notice}" >&2
   compose exec -it "${SERVICE}" gosu "${HOST_USER}" \
     env \
       HOME="${CONTAINER_HOME}" \
       USER="${HOST_USER}" \
       LOGNAME="${HOST_USER}" \
       CODEX_HOME="${CONTAINER_HOME}/.codex" \
-      tmux attach -t "${SESSION}"
+      bash -c "$(cat "${SCRIPT_DIR}/lib/mycodex-tmux.sh")" \
+        mycodex-tmux "${SESSION}" "${mode}" "${notice}"
 }
 
 container_state() {
@@ -997,7 +1071,6 @@ wait_for_container_ready() {
 }
 
 start_stack() {
-  prepare_gui
   if [[ ${#EXTRA_VOLUME_SPECS[@]} -gt 0 ]]; then
     compose_run config >/dev/null
   fi
@@ -1110,8 +1183,8 @@ run_default() {
 
   if ! is_running; then
     if container_exists \
-      && [[ "${GUI_OPTION_SPECIFIED}" != 1 ]] \
-      && [[ "$(container_gui_mode)" != none ]]; then
+      && [[ "${RECONCILE_REQUIRED}" != 1 ]]; then
+      guard_attach_gui_mode
       compose start "${SERVICE}"
       wait_for_container_ready
     else
@@ -1143,11 +1216,8 @@ print_info() {
   local image_ref vol_state vol_created vol_mount requested_gui running_gui
 
   image_ref="${IMAGE_NAME}:${IMAGE_TAG}"
-  if [[ "${GUI_OPTION_SPECIFIED}" == 1 ]]; then
-    requested_gui="$(resolve_gui_mode)"
-  else
-    requested_gui="not specified"
-  fi
+  requested_gui="${GUI_REQUEST:-auto (default)}"
+  detect_gui_mode
   if container_exists; then
     running_gui="$(container_gui_mode)"
   else
@@ -1171,6 +1241,8 @@ print_info() {
   printf '  auto attach       %s\n' "${AUTO_ATTACH}"
   printf '  image             %s\n' "${image_ref}"
   printf '  GUI requested     %s\n' "${requested_gui}"
+  printf '  GUI detected      %s\n' "${GUI_MODE}"
+  printf '  GUI reason        %s\n' "${GUI_REASON}"
   printf '  container GUI     %s\n' "${running_gui}"
   printf '  workspace (host)  %s\n' "${CALLER_DIR}"
   printf '  workdir (in ctr)  %s\n' "${CONTAINER_WORKDIR}"
@@ -1265,6 +1337,27 @@ case "${subcommand}" in
     ;;
   create)
     run_create "$@"
+    ;;
+  run)
+    guard_reconcile_gui_mode
+    prepare_gui
+    compose run "$@"
+    ;;
+  config)
+    # Render explicit GUI overrides without copying credentials or creating
+    # state. The authorization path is the one creation would later prepare.
+    if [[ "${GUI_OPTION_SPECIFIED}" == 1 ]]; then
+      resolve_gui_mode >/dev/null
+      case "${GUI_MODE}" in
+        x11)
+          GUI_X11_DISPLAY="${DISPLAY}"
+          GUI_X11_AUTHORITY="$(gui_state_directory)/xauthority"
+          GUI_COMPOSE_FILE="${GUI_X11_COMPOSE_FILE}"
+          ;;
+        wayland) GUI_COMPOSE_FILE="${GUI_WAYLAND_COMPOSE_FILE}" ;;
+      esac
+    fi
+    compose_without_state_volume_creation config "$@"
     ;;
   down)
     run_down "$@"

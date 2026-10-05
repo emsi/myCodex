@@ -15,17 +15,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install tmux for attach UI tests
+        run: sudo apt-get update && sudo apt-get install -y tmux
+
       - name: Check shell syntax
         run: |
           bash -n entrypoint.sh bin/myCodex bin/build-codex-image.sh \
-            bin/lib/mycodex-image.sh tests/image-versioning_test.sh \
+            bin/lib/mycodex-image.sh bin/lib/mycodex-tmux.sh tests/image-versioning_test.sh \
             tests/launcher-config_test.sh tests/launcher-gui_test.sh \
             tests/launcher-lifecycle_test.sh
 
       - name: Run ShellCheck
         run: |
           shellcheck -x entrypoint.sh bin/myCodex bin/build-codex-image.sh \
-            bin/lib/mycodex-image.sh tests/image-versioning_test.sh \
+            bin/lib/mycodex-image.sh bin/lib/mycodex-tmux.sh tests/image-versioning_test.sh \
             tests/launcher-config_test.sh tests/launcher-gui_test.sh \
             tests/launcher-lifecycle_test.sh
 
@@ -37,6 +40,9 @@ jobs:
 
       - name: Test launcher GUI integration
         run: ./tests/launcher-gui_test.sh
+
+      - name: Test tmux GUI visibility
+        run: python3 tests/tmux-gui_test.py
 
       - name: Test launcher lifecycle
         run: ./tests/launcher-lifecycle_test.sh
