@@ -304,6 +304,22 @@ assert_contains "${FAKE_COMPOSE_LOG}" "up -d --no-build --pull never codex"
 assert_contains "${FAKE_NOTICE_LOG}" "image refresh failed; using the cached"
 
 reset_state
+printf 'sha256:older\n' >"${FAKE_IMAGE_STATE}"
+FAKE_CONTAINER_EXISTS=1 FAKE_PULL_FAILURE=1 MYCODEX_UPDATE_CHECK=0 \
+  run_launcher >"${tmp_dir}/stopped-offline.out" 2>&1
+assert_contains "${FAKE_COMPOSE_LOG}" "start codex"
+assert_not_contains "${FAKE_COMPOSE_LOG}" " up "
+assert_contains "${FAKE_NOTICE_LOG}" "starting the existing container with its original image"
+
+reset_state
+if FAKE_CONTAINER_EXISTS=1 FAKE_CONTAINER_STATUS=paused \
+    run_launcher >"${tmp_dir}/paused.out" 2>&1; then
+  fail "a paused container must not be treated as stopped"
+fi
+assert_not_contains "${FAKE_COMPOSE_LOG}" " pull "
+assert_not_contains "${FAKE_COMPOSE_LOG}" " up "
+
+reset_state
 if FAKE_PULL_FAILURE=1 run_launcher >"${tmp_dir}/pull-missing.out" 2>&1; then
   fail "failed pull without a local image must fail"
 fi

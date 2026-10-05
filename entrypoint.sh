@@ -348,11 +348,18 @@ set -euo pipefail
 [[ -d "$HOME" && -x "$HOME" && -w "$HOME" ]] || exit 1
 [[ -r /etc/mycodex/bashrc ]] || exit 1
 
-# noclobber also protects against simultaneous startups sharing the home.
+# Publish complete files without overwriting anything, even when simultaneous
+# container startups share this home. The temporary file has the user's UID.
 create_missing() {
   local path="$1"
   if [[ ! -e "$path" && ! -L "$path" ]]; then
-    (umask 022; set -o noclobber; cat >"$path") || [[ -e "$path" || -L "$path" ]]
+    (
+      temp="$(mktemp "$HOME/.mycodex-shell.XXXXXX")"
+      trap 'rm -f -- "$temp"' EXIT
+      cat >"$temp"
+      chmod 0644 "$temp"
+      ln -T -- "$temp" "$path" 2>/dev/null || [[ -e "$path" || -L "$path" ]]
+    )
   fi
   [[ -f "$path" && -r "$path" ]] || {
     printf 'myCodex: unreadable shell startup file: %s\n' "$path" >&2

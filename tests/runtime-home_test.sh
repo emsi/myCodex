@@ -11,13 +11,13 @@ trap 'docker volume rm -f "$volume" >/dev/null 2>&1 || true' EXIT
 for spec in 1000:1000 501:20 12345:23456; do
   uid="${spec%:*}"
   gid="${spec#*:}"
-  for scenario in fresh old-marker custom empty symlink bash-profile bash-login inaccessible; do
+  for scenario in fresh old-marker custom empty symlink bash-profile bash-login inaccessible unreadable-rc dangling-rc; do
     docker volume create "$volume" >/dev/null
     docker run --rm --entrypoint /bin/bash -v "$volume:/test-home" "$image" \
       -c '
         set -eu
-        chown "$1:$2" /test-home
         if [[ "$3" != fresh ]]; then
+          chown "$1:$2" /test-home
           mkdir /test-home/.mycodex
           touch /test-home/.mycodex/home-bootstrap.env
           chown -R "$1:$2" /test-home/.mycodex
@@ -38,6 +38,8 @@ for spec in 1000:1000 501:20 12345:23456; do
             ;;
           empty) touch /test-home/.bashrc; chown "$1:$2" /test-home/.bashrc ;;
           inaccessible) chown 0:0 /test-home; chmod 0700 /test-home ;;
+          unreadable-rc) touch /test-home/.bashrc; chmod 0600 /test-home/.bashrc ;;
+          dangling-rc) ln -s missing-rc /test-home/.bashrc ;;
         esac
       ' bash "$uid" "$gid" "$scenario"
 
@@ -49,9 +51,9 @@ for spec in 1000:1000 501:20 12345:23456; do
       -e "MYCODEX_HOST_GROUPS=$gid:workstation"
       -e MYCODEX_CONTAINER_HOME=/custom/home -e CODEX_HOME=/custom/home/.codex
       -e MYCODEX_WORKDIR=/workspace -e "MYCODEX_TEST_SCENARIO=$scenario")
-    if [[ "$scenario" == inaccessible ]]; then
+    if [[ "$scenario" == inaccessible || "$scenario" == unreadable-rc || "$scenario" == dangling-rc ]]; then
       if output="$(docker run "${args[@]}" "$image" /bin/true 2>&1)"; then
-        printf 'FAIL: inaccessible home was accepted\n' >&2
+        printf 'FAIL: inaccessible home/startup file was accepted\n' >&2
         exit 1
       fi
       [[ "$output" == *'check home traversal/write permissions'* ]]

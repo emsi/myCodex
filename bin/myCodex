@@ -910,6 +910,8 @@ prepare_start_image() {
   if compose_without_state_volume_creation pull "${SERVICE}"; then
     selected_image_exists || die "pull completed but selected image is unavailable: ${IMAGE_NAME}:${IMAGE_TAG}"
     IMAGE_REFRESHED=1
+  elif [[ "${1:-}" == existing ]]; then
+    startup_notice "image refresh failed; starting the existing container with its original image and mounts. Retry with 'myCodex pull' when the registry is reachable."
   elif selected_image_exists; then
     startup_notice "image refresh failed; using the cached ${IMAGE_NAME}:${IMAGE_TAG}. Retry with 'myCodex pull' when the registry is reachable."
   else
@@ -961,7 +963,13 @@ start_stopped_container() {
   # An explicit version tag stays pinned. `start` also always preserves the
   # original container; automatic refresh belongs only to the default command.
   if [[ "${IMAGE_TAG}" == latest && "${AUTO_PULL}" == 1 ]]; then
-    prepare_start_image
+    prepare_start_image existing
+    # If discovery failed, the existing container is the strongest available
+    # record of this project's image. A cached alias may even be older than it.
+    if [[ "${IMAGE_REFRESHED}" != 1 ]]; then
+      start_existing_container
+      return
+    fi
     old_image="$(docker inspect --format '{{.Image}}' "${CONTAINER_NAME}")" \
       || die "cannot inspect the stopped container image"
     selected_image="$(docker image inspect --format '{{.Id}}' "${IMAGE_NAME}:${IMAGE_TAG}")" \
@@ -969,7 +977,7 @@ start_stopped_container() {
     if [[ -n "${old_image}" && -n "${selected_image}" && "${old_image}" != "${selected_image}" ]]; then
       if stopped_configuration_matches; then
         # A second launcher may have started it while the pull was in progress.
-        if is_running; then return; fi
+        if is_running; then wait_for_container_ready; return; fi
         case "$(container_state)" in
           exited|created) ;;
           *) die "container state changed during image refresh; retry to attach safely" ;;
