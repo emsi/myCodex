@@ -95,7 +95,14 @@ case "${1:-} ${2:-}" in
       *io.infrasecture.mycodex.gui*)
         if [[ -f "${FAKE_GUI_STATE}" ]]; then cat "${FAKE_GUI_STATE}"; else printf '%s\n' "${FAKE_GUI_MODE:-none}"; fi
         ;;
-      *State.Status*) printf '%s\n' "${FAKE_CONTAINER_STATE:-running}" ;;
+      *State.Status*)
+        if [[ "${FAKE_CONTAINER_EXISTS:-0}" == 1 && "${FAKE_RUNNING:-0}" == 0 && ! -f "${FAKE_GUI_STATE}" ]]; then
+          printf 'exited\n'
+        else
+          printf '%s\n' "${FAKE_CONTAINER_STATE:-running}"
+        fi
+        ;;
+      *'.Image'*) printf 'sha256:same\n' ;;
       *) exit 1 ;;
     esac
     ;;
@@ -144,7 +151,8 @@ case "$1" in
     [[ -z "${MYCODEX_WAYLAND_SOCKET:-}" ]] || mode=wayland
     printf '%s\n' "${mode}" >"${FAKE_GUI_STATE}"
     ;;
-  start|exec|pull|config|down|stop|restart|logs|run) ;;
+  start) printf '%s\n' "${FAKE_GUI_MODE:-none}" >"${FAKE_GUI_STATE}" ;;
+  exec|pull|config|down|stop|restart|logs|run) ;;
   *)
     printf 'unexpected fake compose invocation: %s\n' "$*" >&2
     exit 1

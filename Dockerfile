@@ -121,6 +121,11 @@ EOF
 # Enable autocompletion for tmux sessions.
 RUN sed -i '/^#if ! shopt -oq posix; then$/,/^#fi$/ s/^#//' /etc/bash.bashrc
 
+# Distribution defaults belong in a shared, traversable location, never in
+# another user's home. User .bashrc files can source this and add overrides.
+RUN chmod 0755 /etc/mycodex \
+ && install -o root -g root -m 0644 /etc/skel/.bashrc /etc/mycodex/bashrc
+
 ENV LANG=en_US.UTF-8
 ENV LC_ALL=en_US.UTF-8
 ENV EDITOR=vi

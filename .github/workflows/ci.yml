@@ -23,14 +23,16 @@ jobs:
           bash -n entrypoint.sh bin/myCodex bin/build-codex-image.sh \
             bin/lib/mycodex-image.sh bin/lib/mycodex-tmux.sh tests/image-versioning_test.sh \
             tests/launcher-config_test.sh tests/launcher-gui_test.sh \
-            tests/launcher-lifecycle_test.sh
+            tests/launcher-lifecycle_test.sh tests/runtime-home_test.sh tests/runtime-home-probe.sh \
+            tests/compose-lifecycle_test.sh
 
       - name: Run ShellCheck
         run: |
           shellcheck -x entrypoint.sh bin/myCodex bin/build-codex-image.sh \
             bin/lib/mycodex-image.sh bin/lib/mycodex-tmux.sh tests/image-versioning_test.sh \
             tests/launcher-config_test.sh tests/launcher-gui_test.sh \
-            tests/launcher-lifecycle_test.sh
+            tests/launcher-lifecycle_test.sh tests/runtime-home_test.sh tests/runtime-home-probe.sh \
+            tests/compose-lifecycle_test.sh
 
       - name: Test image versioning
         run: ./tests/image-versioning_test.sh
@@ -46,3 +48,19 @@ jobs:
 
       - name: Test launcher lifecycle
         run: ./tests/launcher-lifecycle_test.sh
+
+  runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the workstation image
+        run: |
+          docker build -t mycodex-runtime-test \
+            --build-arg INSTALL_CLAUDE_CODE=0 \
+            --build-arg INSTALL_GEMINI_CLI=0 \
+            --build-arg INSTALL_OPENCODE=0 .
+      - name: Test runtime identities and shell initialization
+        run: bash tests/runtime-home_test.sh mycodex-runtime-test
+      - name: Test real Compose image reconciliation
+        run: bash tests/compose-lifecycle_test.sh mycodex-runtime-test

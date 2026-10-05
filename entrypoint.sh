@@ -340,13 +340,46 @@ exec_as_runtime_user() {
       "$@"
 }
 
-RUNTIME_SHELL_CMD="$(cat <<'EOF'
-if [[ -f "${HOME}/.bashrc" ]]; then
-  exec bash --login
-fi
-exec bash --rcfile /home/vscode/.bashrc -i
+initialize_shell_config() {
+  # Run as the actual user: root's permission checks hide inaccessible homes.
+  # This deliberately runs even for homes with an old bootstrap marker.
+  if ! as_runtime_user /bin/bash --noprofile --norc -s <<'EOF'
+set -euo pipefail
+[[ -d "$HOME" && -x "$HOME" && -w "$HOME" ]] || exit 1
+[[ -r /etc/mycodex/bashrc ]] || exit 1
+
+# noclobber also protects against simultaneous startups sharing the home.
+create_missing() {
+  local path="$1"
+  if [[ ! -e "$path" && ! -L "$path" ]]; then
+    (umask 022; set -o noclobber; cat >"$path") || [[ -e "$path" || -L "$path" ]]
+  fi
+  [[ -f "$path" && -r "$path" ]] || {
+    printf 'myCodex: unreadable shell startup file: %s\n' "$path" >&2
+    return 1
+  }
+}
+
+create_missing "$HOME/.bashrc" <<'RC'
+# Shared myCodex defaults. Add personal settings below this line.
+. /etc/mycodex/bashrc
+RC
+
+# Bash reads only the first login file; do not bypass a user's chosen profile.
+for profile in .bash_profile .bash_login .profile; do
+  if [[ -e "$HOME/$profile" || -L "$HOME/$profile" ]]; then
+    create_missing "$HOME/$profile" </dev/null
+    exit
+  fi
+done
+create_missing "$HOME/.profile" </etc/skel/.profile
 EOF
-)"
+  then
+    die "cannot initialize shell files in ${RUNTIME_HOME} as UID ${RUNTIME_UID}/GID ${RUNTIME_GID}; check home traversal/write permissions and startup-file readability. Existing files and ownership were preserved."
+  fi
+}
+
+RUNTIME_SHELL_CMD='exec /bin/bash --login -i'
 
 startup_status "configuring runtime user"
 PRIMARY_GROUP="$(group_name_for_gid "${RUNTIME_GID}" "${REQUESTED_GROUP}")"
@@ -356,6 +389,7 @@ ensure_passwordless_sudo "${RUNTIME_USER}"
 
 startup_status "preparing workspace and home"
 bootstrap_empty_home_volume "${RUNTIME_HOME}" "${RUNTIME_UID}" "${RUNTIME_GID}" "${RUNTIME_WORKDIR}"
+initialize_shell_config
 mkdir -p "${RUNTIME_WORKDIR}"
 startup_status "initializing tool configuration"
 initialize_codex_config
@@ -383,7 +417,7 @@ cat /etc/mycodex/session-banner.txt
 EOF
 )"
   STARTUP_CMD="${STARTUP_CMD}"$'\n'"${RUNTIME_SHELL_CMD}"
-  as_runtime_user byobu-tmux new-session -d -s "${SESSION}" -c "${RUNTIME_WORKDIR}" bash --login -lc "${STARTUP_CMD}"
+  as_runtime_user byobu-tmux new-session -d -s "${SESSION}" -c "${RUNTIME_WORKDIR}" bash --noprofile --norc -c "${STARTUP_CMD}"
 fi
 as_runtime_user byobu-tmux set-option -t "${SESSION}" default-shell /bin/bash >/dev/null
 as_runtime_user byobu-tmux set-option -t "${SESSION}" default-command "${RUNTIME_SHELL_CMD}" >/dev/null

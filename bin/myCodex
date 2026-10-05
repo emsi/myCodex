@@ -97,6 +97,9 @@ STARTUP_PROGRESS_INTERVAL_SECONDS="${MYCODEX_STARTUP_PROGRESS_INTERVAL_SECONDS:-
 IMAGE_NAME="${MYCODEX_IMAGE_NAME:-${MYCODEX_DEFAULT_IMAGE_NAME}}"
 IMAGE_TAG="${MYCODEX_IMAGE_TAG:-latest}"
 UPDATE_CHECK="${MYCODEX_UPDATE_CHECK:-1}"
+AUTO_PULL="${MYCODEX_AUTO_PULL:-1}"
+IMAGE_REFRESHED=0
+STARTUP_NOTICES=""
 HOST_UID="$(id -u)"
 HOST_GID="$(id -g)"
 HOST_USER="$(id -un)"
@@ -125,6 +128,7 @@ usage() {
 Usage:
   myCodex [options]                  Start stack if needed, then attach
   myCodex [options] attach           Attach to tmux session in codex service
+  myCodex [options] notices          Attach and reopen the last startup/update notices
   myCodex [options] info             Print the resolved configuration and exit
   myCodex [options] ps [args...]     docker compose ps
   myCodex [options] start [args...]  docker compose start (defaults to codex)
@@ -158,6 +162,16 @@ case "${UPDATE_CHECK}" in
   0|1) ;;
   *) die "MYCODEX_UPDATE_CHECK must be 0 or 1: ${UPDATE_CHECK}" ;;
 esac
+
+case "${AUTO_PULL}" in
+  0|1) ;;
+  *) die "MYCODEX_AUTO_PULL must be 0 or 1: ${AUTO_PULL}" ;;
+esac
+
+startup_notice() {
+  printf 'myCodex: %s\n' "$*" >&2
+  STARTUP_NOTICES+="${STARTUP_NOTICES:+$'\n'}myCodex: $*"
+}
 
 yaml_quote() {
   local value="$1"
@@ -608,9 +622,10 @@ gui_option_for_mode() {
 }
 
 prepare_gui() {
+  local preserve_stopped="${1:-0}"
   # Only creation/reconciliation calls this function. An omitted flag must not
   # change the mode of an established container, even during an explicit up.
-  if [[ "${GUI_OPTION_SPECIFIED}" != 1 ]] && container_exists; then
+  if [[ "${GUI_OPTION_SPECIFIED}" != 1 && "${preserve_stopped}" != 1 ]] && container_exists; then
     GUI_MODE=none
     return
   fi
@@ -806,9 +821,12 @@ compose_without_state_volume_creation() {
 }
 
 is_running() {
+  local services
   ensure_state_volume
   ensure_extra_volumes_override
-  run_docker_compose ps --status running --services 2>/dev/null | grep -Fxq "${SERVICE}"
+  services="$(run_docker_compose ps --status running --services)" \
+    || die "cannot determine whether the project is running; no container was changed"
+  grep -Fxq "${SERVICE}" <<<"${services}"
 }
 
 container_gui_mode() {
@@ -882,6 +900,100 @@ ensure_selected_image() {
   fi
 }
 
+prepare_start_image() {
+  if [[ "${IMAGE_TAG}" != latest || "${AUTO_PULL}" != 1 ]]; then
+    ensure_selected_image
+    return
+  fi
+
+  echo "myCodex: checking published image ${IMAGE_NAME}:${IMAGE_TAG}" >&2
+  if compose_without_state_volume_creation pull "${SERVICE}"; then
+    selected_image_exists || die "pull completed but selected image is unavailable: ${IMAGE_NAME}:${IMAGE_TAG}"
+    IMAGE_REFRESHED=1
+  elif selected_image_exists; then
+    startup_notice "image refresh failed; using the cached ${IMAGE_NAME}:${IMAGE_TAG}. Retry with 'myCodex pull' when the registry is reachable."
+  else
+    die "image refresh failed and no local image is available: ${IMAGE_NAME}:${IMAGE_TAG}"
+  fi
+}
+
+stopped_configuration_matches() {
+  local current_gui current_hash desired_hash
+
+  # Reproduce the established GUI mode, never migrate it during an image update.
+  current_gui="$(container_gui_mode)"
+  if [[ "${GUI_OPTION_SPECIFIED}" != 1 ]]; then
+    case "${current_gui}" in
+      none) GUI_MODE=none ;;
+      x11|wayland)
+        GUI_REQUEST="${current_gui}"
+        detect_gui_mode
+        [[ "${GUI_MODE}" == "${current_gui}" ]] || return 1
+        ;;
+      *) return 1 ;;
+    esac
+  fi
+  prepare_gui 1
+  [[ "${GUI_MODE}" == "${current_gui}" ]] || return 1
+
+  # Compose's own hash covers mounts, environment, image reference and service
+  # options. Missing flags, old metadata or unsupported Compose versions fail
+  # closed: start the original container instead of guessing its configuration.
+  current_hash="$(docker inspect --format '{{index .Config.Labels "com.docker.compose.config-hash"}}' "${CONTAINER_NAME}")" || return 1
+  [[ "${current_hash}" =~ ^[a-f0-9]{64}$ ]] || return 1
+  desired_hash="$(compose_without_state_volume_creation config --hash "${SERVICE}")" || return 1
+  [[ "${desired_hash}" == "${SERVICE} ${current_hash}" ]]
+}
+
+start_existing_container() {
+  compose start "${SERVICE}"
+  wait_for_container_ready
+}
+
+start_stopped_container() {
+  local old_image selected_image
+
+  guard_attach_gui_mode
+  case "$(container_state)" in
+    exited|created) ;;
+    *) die "container is not stopped; use 'myCodex ps' to inspect its state" ;;
+  esac
+  # An explicit version tag stays pinned. `start` also always preserves the
+  # original container; automatic refresh belongs only to the default command.
+  if [[ "${IMAGE_TAG}" == latest && "${AUTO_PULL}" == 1 ]]; then
+    prepare_start_image
+    old_image="$(docker inspect --format '{{.Image}}' "${CONTAINER_NAME}")" \
+      || die "cannot inspect the stopped container image"
+    selected_image="$(docker image inspect --format '{{.Id}}' "${IMAGE_NAME}:${IMAGE_TAG}")" \
+      || die "cannot inspect the selected image"
+    if [[ -n "${old_image}" && -n "${selected_image}" && "${old_image}" != "${selected_image}" ]]; then
+      if stopped_configuration_matches; then
+        # A second launcher may have started it while the pull was in progress.
+        if is_running; then return; fi
+        case "$(container_state)" in
+          exited|created) ;;
+          *) die "container state changed during image refresh; retry to attach safely" ;;
+        esac
+        startup_notice "applying the refreshed image to the stopped container; home and workspace volumes are preserved."
+        start_stack
+        return
+      fi
+      startup_notice "a different local image is available, but the stopped container's configuration could not be reproduced. Keeping its original image and mounts. Repeat its --gui, -v and -f options with 'myCodex up -d' to apply the update."
+    fi
+  fi
+  start_existing_container
+}
+
+notify_image_refresh_hint() {
+  if [[ "${IMAGE_TAG}" != latest ]]; then
+    echo "myCodex: MYCODEX_IMAGE_TAG=${IMAGE_TAG} pins this image; select a newer tag to update it." >&2
+  elif [[ "${IMAGE_REFRESHED}" == 1 ]]; then
+    echo "myCodex: The latest published workstation image was just pulled. A newer npm release does not mean its workstation image has been published yet." >&2
+  else
+    echo "myCodex: Run 'myCodex pull' to refresh the published image; pulling does not recreate this container." >&2
+  fi
+}
+
 notify_newer_codex() {
   local current_version selected_version latest_version comparison
   local selected_update_available=0
@@ -938,34 +1050,27 @@ notify_newer_codex() {
 
   if [[ "${selected_update_available}" == 1 ]]; then
     echo "myCodex: Codex ${latest_version} is available upstream, newer than the selected local image's ${selected_version}." >&2
-    if [[ "${IMAGE_TAG}" == latest ]]; then
-      echo "myCodex: Run 'myCodex pull' to refresh it; pulling does not recreate this container." >&2
-    else
-      echo "myCodex: MYCODEX_IMAGE_TAG=${IMAGE_TAG} pins this image; select a newer tag to update it." >&2
-    fi
+    notify_image_refresh_hint
     return 0
   fi
 
   echo "myCodex: Codex ${latest_version} is available upstream; this container runs ${current_version}." >&2
   if [[ -n "${selected_version}" ]]; then
     echo "myCodex: The selected local image contains Codex ${selected_version}." >&2
-    if [[ "${IMAGE_TAG}" == latest ]]; then
-      echo "myCodex: Run 'myCodex pull' to refresh it; pulling does not recreate this container." >&2
-    else
-      echo "myCodex: MYCODEX_IMAGE_TAG=${IMAGE_TAG} pins this image; select a newer tag to update it." >&2
-    fi
+    notify_image_refresh_hint
   else
     echo "myCodex: A matching workstation image is not available locally." >&2
-    if [[ "${IMAGE_TAG}" == latest ]]; then
-      echo "myCodex: Run 'myCodex pull' to fetch the latest published image." >&2
-    else
-      echo "myCodex: MYCODEX_IMAGE_TAG=${IMAGE_TAG} pins the selected image." >&2
-    fi
+    notify_image_refresh_hint
   fi
 }
 
 attach_with_update_check() {
-  notify_newer_codex
+  local updates
+  updates="$(notify_newer_codex 2>&1)"
+  if [[ -n "${updates}" ]]; then
+    printf '%s\n' "${updates}" >&2
+    STARTUP_NOTICES+="${STARTUP_NOTICES:+$'\n'}${updates}"
+  fi
   attach_tmux
 }
 
@@ -992,7 +1097,7 @@ attach_tmux() {
       LOGNAME="${HOST_USER}" \
       CODEX_HOME="${CONTAINER_HOME}/.codex" \
       bash -c "$(cat "${SCRIPT_DIR}/lib/mycodex-tmux.sh")" \
-        mycodex-tmux "${SESSION}" "${mode}" "${notice}"
+        mycodex-tmux "${SESSION}" "${mode}" "${notice}" "${STARTUP_NOTICES}" "${1:-0}"
 }
 
 container_state() {
@@ -1184,13 +1289,11 @@ run_default() {
   if ! is_running; then
     if container_exists \
       && [[ "${RECONCILE_REQUIRED}" != 1 ]]; then
-      guard_attach_gui_mode
-      compose start "${SERVICE}"
-      wait_for_container_ready
+      start_stopped_container
     else
       guard_reconcile_gui_mode
       prepare_gui
-      ensure_selected_image
+      prepare_start_image
       start_stack
     fi
   else
@@ -1288,6 +1391,10 @@ case "${subcommand}" in
   attach)
     guard_attach_gui_mode
     attach_with_update_check
+    ;;
+  notices)
+    guard_attach_gui_mode
+    attach_tmux 1
     ;;
   info)
     print_info
