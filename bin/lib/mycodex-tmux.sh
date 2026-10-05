@@ -6,6 +6,8 @@ set -euo pipefail
 session="$(tmux display-message -p -t "=$1:" '#{session_id}')"
 mode="$2"
 notice="$3"
+details="${4:-}"
+reopen="${5:-0}"
 
 case "${mode}" in
   x11) badge='GUI:X11' ;;
@@ -26,6 +28,21 @@ if (( length < 8 )); then
   tmux set-option -t "${session}" status-left-length 8
 fi
 
-# Queue the message in the attaching client, after tmux owns the screen.
-# A host echo or a shell command after a blocking attach would miss this point.
+# Retain the full text in the session, independent of pane scrollback and any
+# alternate-screen application. Keep the last report when a later check is quiet.
+if [[ -n "${details}" ]]; then
+  tmux set-option -t "${session}" @mycodex-notices \
+    "${notice}"$'\n\n'"${details}"$'\n\nPress q to close. Reopen with: myCodex notices'
+elif [[ -z "$(tmux show-options -qv -t "${session}" @mycodex-notices)" ]]; then
+  tmux set-option -t "${session}" @mycodex-notices "${notice}"
+fi
+
+# Queue UI in the attaching client, after tmux owns the screen. The popup reads
+# a session option rather than interpolating notice text into a shell command.
+# A pager keeps long reports scrollable and waits for explicit dismissal.
+if [[ -n "${details}" || "${reopen}" == 1 ]]; then
+  exec tmux attach-session -t "${session}" \; \
+    display-popup -E -w 90% -h 80% -T 'myCodex notices (q to close)' \
+      "tmux show-options -qv -t '${session}' @mycodex-notices | LESS= less -+F -+X"
+fi
 exec tmux attach-session -t "${session}" \; display-message -d 8000 -l "${notice}"

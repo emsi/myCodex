@@ -58,16 +58,19 @@ with tempfile.TemporaryDirectory(prefix="mycodex-tmux-test.") as directory:
 
     children = []
 
-    def attach(mode, notice, width=80, status=True):
+    def attach(mode, notice, width=80, status=True, details="", reopen=False):
         pid, fd = pty.fork()
         if pid == 0:
             fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 24, width, 0, 0))
             os.execvpe(
                 "bash",
-                ["bash", str(ROOT / "bin/lib/mycodex-tmux.sh"), "review", mode, notice],
+                ["bash", str(ROOT / "bin/lib/mycodex-tmux.sh"), "review", mode, notice,
+                 details, "1" if reopen else "0"],
                 env,
             )
         children.append((pid, fd))
+        if details or reopen:
+            return fd
         read_until(fd, notice.encode())
         os.write(fd, b"\x1b")  # Dismiss tmux's message, without typing a command.
         badge = {"wayland": b"GUI:WL", "x11": b"GUI:X11", "none": b"GUI:off"}[mode]
@@ -115,7 +118,29 @@ with tempfile.TemporaryDirectory(prefix="mycodex-tmux-test.") as directory:
         tmux("detach-client", "-s", "=review")
         tmux("set-option", "-t", "review", "status", "off")
         attach("wayland", "GUI access enabled: Wayland", status=False)
-        print("PASS: real tmux attach notices, persistent badges, reattach, clients, and narrow terminals")
+        tmux("detach-client", "-s", "=review")
+
+        # Long reports survive alternate-screen apps and remain available after
+        # dismissal. Shell and tmux syntax inside messages must stay literal.
+        details = "Codex 0.160.0 is available\n" + "\n".join(
+            f"Detail {i}: information that must remain readable" for i in range(40)
+        ) + "\nEND_OF_REPORT $(touch /tmp/mycodex-notice-injection) #{pane_id}"
+        report = attach("none", "GUI access disabled (headless)", details=details)
+        read_until(report, b"Codex 0.160.0 is available")
+        os.write(report, b"G")
+        read_until(report, b"END_OF_REPORT")
+        assert tmux("show-options", "-qv", "-t", "review", "@mycodex-notices").startswith(
+            "GUI access disabled (headless)\n\n" + details
+        )
+        assert not Path("/tmp/mycodex-notice-injection").exists()
+        os.write(report, b"q")
+        read_until(report, b"ACTIVE_APPLICATION")
+        tmux("detach-client", "-s", "=review")
+        report = attach("none", "GUI access disabled (headless)", reopen=True, width=40)
+        read_until(report, b"Codex 0.160.0 is available")
+        os.write(report, b"q")
+        assert "ACTIVE_APPLICATION" in tmux("capture-pane", "-p", "-t", pane)
+        print("PASS: tmux GUI badges, persistent scrollable reports, reattach, clients, and narrow terminals")
     finally:
         subprocess.run([TMUX, "-S", socket, "kill-server"], env=env, capture_output=True)
         for pid, fd in children:

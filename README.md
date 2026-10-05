@@ -106,7 +106,7 @@ cd project
 myCodex
 ```
 
-The launcher pulls the published `latest` image when it is not already local,
+The launcher refreshes the published `latest` image before starting an inactive project,
 starts the container if needed, waits for the tmux session to be ready, and
 attaches to it. Building locally is optional and documented under
 [Image Builds](#image-builds).
@@ -128,7 +128,7 @@ the tag only, without the image repository or a leading `v`:
 MYCODEX_IMAGE_TAG=0.146.0-r2 myCodex
 ```
 
-That form starts the selected image when the project has no running container.
+That form starts the selected image when the project has no existing container.
 When switching an existing project, export the selection, pull it explicitly,
 and let Compose reconcile the container before attaching:
 
@@ -196,6 +196,12 @@ on reattach. It reports configured access, not a successful clipboard test.
 These notices work with existing images and sessions; the launcher does not
 write a tmux configuration file or type commands into an active pane.
 
+Update reports and offline-image warnings appear in a scrollable tmux popup
+after attachment. They stay open until you press `q`, survive applications
+that clear the terminal, and can be reopened with `myCodex notices`. The last
+report is kept in the tmux session until that session ends. Other clients and
+the running application keep their screens and input.
+
 X11 requires the host `xauth` command. The launcher copies only the active
 display credentials into a private file under the user's XDG state directory;
 it does not use `xhost +`. Only the selected `/tmp/.X11-unix/X<N>` socket and
@@ -214,8 +220,9 @@ removed, or switched by attaching to an existing running container. Later bare
 not need `--gui` again. `start` and `restart` also preserve the existing mounts.
 Existing headless containers stay headless, including on plain `up -d`. When a
 local desktop is detected while attaching to one, the notice explains how to
-enable access explicitly. A stopped container is started with its existing
-configuration unless other requested options require reconciliation.
+enable access explicitly. Automatic image updates preserve a stopped container's
+established GUI mode. If the original configuration cannot be reproduced, the
+launcher starts the original container and shows instructions in the notice popup.
 
 Change an established mode through an explicit Compose reconciliation:
 
@@ -340,20 +347,48 @@ The default command starts Compose detached, reports startup phases until the
 configured tmux session exists, and then attaches. Readiness polling occurs
 only during startup; the service has no steady-state Docker healthcheck.
 `CODEX_BYOBU_SESSION` changes the session name consistently in both the wrapper
-and container. Existing readable `$HOME/.bashrc` files are preserved.
+and container. Every tmux window and split starts an interactive login Bash.
 
-Fresh homes currently fall back to a devcontainer rcfile under
-`/home/vscode`. That path is inaccessible to some non-UID-1000 users; the
-portable fallback is tracked in [issue #6](https://github.com/emsi/myCodex/issues/6).
+Shared Bash defaults live at `/etc/mycodex/bashrc`, owned by root and readable
+by every runtime UID/GID. They use the distribution's shell defaults, including
+history, aliases and completion. On every startup, including existing home
+volumes, the entrypoint creates a missing `$HOME/.bashrc` that sources this file.
+On older images where the shared file is absent, that `.bashrc` falls back to
+the distribution defaults at `/etc/skel/.bashrc`. This lets containers still
+running older images share the home with updated containers without a missing-file
+error. Existing shells keep their current settings; new shells use the defaults
+available in the image they run in.
+It installs a default `.profile` only when no `.bash_profile`, `.bash_login` or
+`.profile` exists. Existing files, including empty files and symlinks, retain
+their contents and ownership; user profiles control their own startup behavior.
+An inaccessible home or startup file produces an actionable error instead of
+falling back to another user's home. No recursive home/workspace chown is used.
+
+This change requires an image built from the updated Dockerfile and entrypoint.
+Updating the host launcher alone cannot change shell files inside an older image.
 
 ### Image Resolution
 
-Ordinary startup uses `MYCODEX_IMAGE_TAG` when set and `latest` otherwise. If no
-container is running, the launcher pulls the exact selected reference only when
-it is absent locally, then starts with `--no-build --pull never`. A running
-container is never replaced merely because the remote `latest` tag moved.
+Ordinary startup uses `MYCODEX_IMAGE_TAG` when set and `latest` otherwise. Before
+starting an inactive project using `latest`, the launcher pulls that reference
+even when it is cached. A failed pull falls back to the cached image with a
+visible warning; without a cached image it fails. Other tags are pulled only
+when missing. Set `MYCODEX_AUTO_PULL=0` to use cached images without a refresh.
+This is independent of the informational `MYCODEX_UPDATE_CHECK` setting.
+
+A new container starts with `--no-build --pull never` after image selection.
+A stopped container using `latest` is replaced when the image ID changed and
+Compose's service configuration hash matches its original configuration. This
+preserves its home/workspace volumes and GUI mode; files stored only in the
+container's writable layer are replaced along with the image. A changed or
+unverifiable configuration (for example omitted `-v` or `-f` options) keeps the
+original container and reports how to apply the update explicitly. `myCodex
+start` always starts the original container without refreshing or replacing it.
+A running container is never pulled or replaced merely because `latest` moved.
+Persistent environment settings (such as a custom state volume or session name)
+do not request recreation on each attach; use `up` to apply changed defaults.
 `myCodex pull` only pulls the selected Compose service; use `myCodex up -d`
-explicitly to apply a pulled image.
+explicitly to apply a pulled image to a running container.
 
 Before an interactive attach, the launcher compares the running Codex version
 with the selected local image's version and performs a short, best-effort check
@@ -361,8 +396,11 @@ for a newer upstream Codex release. It reports when a local image is ready to
 apply and distinguishes that from an upstream release that is not yet local.
 Image revision suffixes such as `-r2` remain part of the selected tag; version
 comparison uses the image's dedicated Codex-version label. The check is
-informational, and failure or an offline registry never blocks attachment. Set
-`MYCODEX_UPDATE_CHECK=0` to disable it.
+informational, and failure or an offline registry never blocks attachment. A
+new npm release does not imply a matching workstation image has been published;
+after a successful refresh, the notice explains that distinction. Reports stay
+visible inside tmux and are retrievable with `myCodex notices`. Set
+`MYCODEX_UPDATE_CHECK=0` to disable version checks.
 
 ### Direct Compose Guard
 
@@ -523,6 +561,7 @@ run the newly built version without a registry pull.
 | `MYCODEX_STATE_VOLUME_NAME` | `codex_state` | Shared/custom Docker volume mounted as the runtime home. `--private-env` takes precedence and uses `<project>_codex_state`. |
 | `MYCODEX_IMAGE_NAME` | `ghcr.io/infrasecture/harness-workstation` | Image name used by build and runtime helpers. |
 | `MYCODEX_IMAGE_TAG` | `latest` | Runtime image tag. Set an immutable revision-qualified release to pin a workstation image. |
+| `MYCODEX_AUTO_PULL` | `1` | Refresh `latest` before starting an inactive project. Set to `0` to use cached images; missing images are still pulled. Running containers and other tags are never automatically refreshed. |
 | `MYCODEX_UPDATE_CHECK` | `1` | Before interactive attach, report a newer upstream Codex version when one can be determined quickly. Set to `0` to disable. |
 | `MYCODEX_CONTAINER_HOME` | host `$HOME` via `myCodex` | Runtime home path mounted from the persistent state volume. |
 | `MYCODEX_WORKDIR` | current directory via `myCodex` | Container workdir and workspace bind target. |
