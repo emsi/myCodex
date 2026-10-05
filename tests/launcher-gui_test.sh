@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Do not inherit the test runner's desktop, SSH session, or Docker endpoint.
+unset DISPLAY WAYLAND_DISPLAY XDG_RUNTIME_DIR SSH_CONNECTION SSH_CLIENT SSH_TTY DOCKER_HOST DOCKER_CONTEXT
+
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 
@@ -77,19 +80,27 @@ set -euo pipefail
 printf 'docker %s\n' "$*" >>"${FAKE_DOCKER_LOG}"
 
 case "${1:-} ${2:-}" in
+  "context show") printf '%s\n' "${DOCKER_CONTEXT:-default}" ;;
+  "context inspect") printf '%s\n' "${FAKE_DOCKER_ENDPOINT:-unix:///var/run/docker.sock}" ;;
+  "info --format")
+    [[ "${FAKE_DOCKER_UNAVAILABLE:-0}" != 1 ]] || exit 1
+    printf '%s\n' "${FAKE_DOCKER_OS:-Ubuntu}"
+    ;;
   "volume inspect") exit 0 ;;
   "volume create") exit 0 ;;
   "image inspect") exit 0 ;;
   "inspect --format")
-    [[ "${FAKE_CONTAINER_EXISTS:-0}" == 1 ]] || exit 1
+    [[ "${FAKE_CONTAINER_EXISTS:-0}" == 1 || -f "${FAKE_GUI_STATE}" ]] || exit 1
     case "$3" in
-      *io.infrasecture.mycodex.gui*) printf '%s\n' "${FAKE_GUI_MODE:-none}" ;;
+      *io.infrasecture.mycodex.gui*)
+        if [[ -f "${FAKE_GUI_STATE}" ]]; then cat "${FAKE_GUI_STATE}"; else printf '%s\n' "${FAKE_GUI_MODE:-none}"; fi
+        ;;
       *State.Status*) printf '%s\n' "${FAKE_CONTAINER_STATE:-running}" ;;
       *) exit 1 ;;
     esac
     ;;
   "inspect sample-project-codex")
-    [[ "${FAKE_CONTAINER_EXISTS:-0}" == 1 ]]
+    [[ "${FAKE_CONTAINER_EXISTS:-0}" == 1 || -f "${FAKE_GUI_STATE}" ]]
     ;;
   "exec sample-project-codex")
     case "$*" in
@@ -119,13 +130,21 @@ set -euo pipefail
   printf 'wayland_socket=%s\n' "${MYCODEX_WAYLAND_SOCKET:-}"
 } >>"${FAKE_COMPOSE_LOG}"
 
-case " $* " in
-  *' ps --status running --services '*)
-    if [[ "${FAKE_RUNNING:-0}" == 1 ]]; then
+while [[ "${1:-}" == -p || "${1:-}" == -f ]]; do shift 2; done
+printf 'command=%s\n' "$1" >>"${FAKE_COMPOSE_LOG}"
+case "$1" in
+  ps)
+    if [[ " $* " == *' --status running '* && "${FAKE_RUNNING:-0}" == 1 ]]; then
       printf 'codex\n'
     fi
     ;;
-  *' up '*|*' start '*|*' exec -it codex '*|*' pull '*|*' config '*|*' down '*) ;;
+  up|create)
+    mode=none
+    [[ -z "${MYCODEX_X11_DISPLAY:-}" ]] || mode=x11
+    [[ -z "${MYCODEX_WAYLAND_SOCKET:-}" ]] || mode=wayland
+    printf '%s\n' "${mode}" >"${FAKE_GUI_STATE}"
+    ;;
+  start|exec|pull|config|down|stop|restart|logs|run) ;;
   *)
     printf 'unexpected fake compose invocation: %s\n' "$*" >&2
     exit 1
@@ -138,11 +157,13 @@ cat >"${fake_bin}/xauth" <<'EOF'
 set -euo pipefail
 
 if [[ "${1:-}" == nlist ]]; then
+  [[ "${FAKE_XAUTH_MISSING:-0}" != 1 ]] || exit 1
   printf '0100 000c 6d79636f6465782d677569 0001 30 0012 30313233343536373839616263646566\n'
   exit 0
 fi
 
 if [[ "${1:-}" == -f && "${3:-}" == nmerge ]]; then
+  [[ "${FAKE_XAUTH_MERGE_FAILURE:-0}" != 1 ]] || exit 1
   input="$(cat)"
   [[ -n "${input}" ]]
   printf '%s\n' "${input}" >"$2"
@@ -156,8 +177,10 @@ chmod +x "${fake_bin}/docker" "${fake_bin}/compose" "${fake_bin}/xauth"
 
 export FAKE_DOCKER_LOG="${tmp_dir}/docker.log"
 export FAKE_COMPOSE_LOG="${tmp_dir}/compose.log"
+export FAKE_GUI_STATE="${tmp_dir}/container-gui"
 
 reset_logs() {
+  rm -f -- "${FAKE_GUI_STATE}"
   : >"${FAKE_DOCKER_LOG}"
   : >"${FAKE_COMPOSE_LOG}"
 }
@@ -280,7 +303,7 @@ FAKE_RUNNING=0 \
 FAKE_GUI_MODE=x11 \
   run_launcher >/dev/null 2>&1
 assert_contains "${FAKE_COMPOSE_LOG}" " start codex"
-assert_not_contains "${FAKE_COMPOSE_LOG}" " up "
+assert_not_contains "${FAKE_COMPOSE_LOG}" "command=up"
 
 info_output="${tmp_dir}/info.out"
 DISPLAY=":${x11_display_number}" \
@@ -294,4 +317,109 @@ FAKE_CONTAINER_EXISTS=1 FAKE_GUI_MODE=x11 \
   run_launcher down >/dev/null 2>&1
 [[ ! -e "${xauth_file}" ]] || fail "Xauthority state remained after container removal"
 
-printf 'PASS: explicit X11 and Wayland launcher integration\n'
+reset_logs
+WAYLAND_DISPLAY=wayland-test XDG_RUNTIME_DIR="${tmp_dir}/runtime" \
+  run_launcher >"${tmp_dir}/automatic.out" 2>&1
+assert_contains "${FAKE_COMPOSE_LOG}" "docker-compose.gui-wayland.yaml"
+assert_contains "${tmp_dir}/automatic.out" "enabling GUI access (wayland)"
+assert_contains "${FAKE_COMPOSE_LOG}" "mycodex-tmux codex wayland GUI access enabled: Wayland"
+
+reset_logs
+DISPLAY=":${x11_display_number}" run_launcher create >"${tmp_dir}/automatic-x11.out" 2>&1
+assert_contains "${FAKE_COMPOSE_LOG}" "docker-compose.gui-x11.yaml"
+
+reset_logs
+WAYLAND_DISPLAY=missing XDG_RUNTIME_DIR="${tmp_dir}/runtime" DISPLAY=":${x11_display_number}" \
+  run_launcher up -d >/dev/null 2>&1
+assert_contains "${FAKE_COMPOSE_LOG}" "docker-compose.gui-x11.yaml"
+
+reset_logs
+run_launcher up -d >"${tmp_dir}/headless.out" 2>&1
+assert_not_contains "${FAKE_COMPOSE_LOG}" "docker-compose.gui-"
+assert_not_contains "${tmp_dir}/headless.out" "starting headless:"
+if run_launcher --gui up -d >"${tmp_dir}/required.out" 2>&1; then
+  fail "explicit --gui silently fell back to headless"
+fi
+assert_contains "${tmp_dir}/required.out" "--gui unavailable:"
+
+# Automatic failures are informative; explicit requests keep strict errors.
+for failure in xauth credentials merge stale ssh remote desktop unavailable; do
+  reset_logs
+  (
+    export DISPLAY=":${x11_display_number}"
+    case "${failure}" in
+      xauth)
+        # shellcheck disable=SC2317 # Exported for calls in the child launcher.
+        command() {
+          [[ "$*" != '-v xauth' ]] || return 1
+          builtin command "$@"
+        }
+        export -f command
+        ;;
+      credentials) export FAKE_XAUTH_MISSING=1 ;;
+      merge) export FAKE_XAUTH_MERGE_FAILURE=1 ;;
+      stale) export DISPLAY=:99999999 ;;
+      ssh) export SSH_CONNECTION='test connection' ;;
+      remote) export DOCKER_HOST=tcp://remote:2376 ;;
+      desktop) export FAKE_DOCKER_OS='Docker Desktop' ;;
+      unavailable) export FAKE_DOCKER_UNAVAILABLE=1 ;;
+    esac
+    run_launcher up -d >"${tmp_dir}/${failure}.out" 2>&1
+    assert_contains "${tmp_dir}/${failure}.out" "starting headless:"
+    assert_not_contains "${FAKE_COMPOSE_LOG}" "docker-compose.gui-"
+    if [[ "${failure}" != ssh ]]; then
+      if run_launcher --gui up -d >"${tmp_dir}/${failure}-required.out" 2>&1; then
+        fail "explicit GUI accepted ${failure}"
+      fi
+    fi
+  )
+done
+
+# Named contexts take precedence over DOCKER_HOST, in both directions.
+reset_logs
+DISPLAY=":${x11_display_number}" DOCKER_HOST=tcp://remote:2376 DOCKER_CONTEXT=local \
+  run_launcher up -d >/dev/null 2>&1
+assert_contains "${FAKE_COMPOSE_LOG}" "docker-compose.gui-x11.yaml"
+reset_logs
+DISPLAY=":${x11_display_number}" DOCKER_HOST=unix:///var/run/docker.sock DOCKER_CONTEXT=remote \
+  FAKE_DOCKER_ENDPOINT=ssh://remote run_launcher up -d >/dev/null 2>&1
+assert_not_contains "${FAKE_COMPOSE_LOG}" "docker-compose.gui-"
+
+reset_logs
+DISPLAY=":${x11_display_number}" SSH_CONNECTION='test connection' \
+  run_launcher --gui=x11 up -d >/dev/null 2>&1
+assert_contains "${FAKE_COMPOSE_LOG}" "docker-compose.gui-x11.yaml"
+
+reset_logs
+DISPLAY=":${x11_display_number}" run_launcher --no-gui up -d >/dev/null 2>&1
+assert_not_contains "${FAKE_COMPOSE_LOG}" "docker-compose.gui-"
+assert_not_contains "${FAKE_DOCKER_LOG}" "context inspect"
+
+# Existing modes win over the current desktop. Bare attach/start/up never
+# migrates an established headless container or copies display credentials.
+for action in attach start restart up; do
+  reset_logs
+  DISPLAY=":${x11_display_number}" FAKE_CONTAINER_EXISTS=1 FAKE_RUNNING=1 \
+    run_launcher "${action}" >"${tmp_dir}/existing-${action}.out" 2>&1
+  assert_not_contains "${FAKE_COMPOSE_LOG}" "docker-compose.gui-"
+done
+assert_contains "${tmp_dir}/existing-attach.out" "GUI off; desktop detected"
+reset_logs
+DISPLAY=":${x11_display_number}" FAKE_CONTAINER_EXISTS=1 FAKE_RUNNING=0 \
+  run_launcher >/dev/null 2>&1
+assert_contains "${FAKE_COMPOSE_LOG}" " start codex"
+assert_not_contains "${FAKE_COMPOSE_LOG}" "command=up"
+
+# Observation/management commands must not depend on display preparation.
+rm -f -- "${xauth_file}"
+for action in info ps logs stop restart pull config; do
+  reset_logs
+  DISPLAY=":${x11_display_number}" FAKE_XAUTH_MERGE_FAILURE=1 \
+    run_launcher --gui=x11 "${action}" >"${tmp_dir}/observe-${action}.out" 2>&1
+  [[ ! -e "${xauth_file}" ]] || fail "${action} prepared X11 credentials"
+done
+assert_contains "${tmp_dir}/observe-info.out" "GUI detected      x11"
+assert_contains "${tmp_dir}/observe-info.out" "GUI reason        local X11 socket and credentials available"
+assert_contains "${FAKE_COMPOSE_LOG}" "docker-compose.gui-x11.yaml"
+
+printf 'PASS: automatic and explicit GUI selection, lifecycle, and preparation boundaries\n'

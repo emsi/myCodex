@@ -161,20 +161,40 @@ myCodex --private-env
 
 ### Local GUI And Screenshot Clipboard Access
 
-The default container is headless. To let Codex read images from the local
-desktop clipboard, opt in when the container is first created:
+New containers automatically enable desktop access when launched from a local
+Linux graphical session with a local Docker Engine. The launcher prefers a
+writable Wayland socket, then a local X11 Unix socket with readable `xauth`
+credentials. To create a headless container even on a desktop:
+
+```bash
+myCodex --no-gui
+```
+
+Without a usable display, startup continues headless. If display variables are
+present but forwarding cannot be prepared, the launcher explains why. Automatic
+forwarding is disabled over SSH and with remote Docker or Docker Desktop.
+The effective Docker context takes precedence over `DOCKER_HOST`.
+
+Use `--gui` (or `--gui=auto`) to require desktop access, or select a backend:
 
 ```bash
 myCodex --gui
-```
-
-`--gui` selects an active Wayland socket first and otherwise uses a local X11
-Unix display. Force a backend when needed:
-
-```bash
 myCodex --gui=x11
 myCodex --gui=wayland
 ```
+
+Explicit GUI requests fail if the selected backend cannot be prepared. Over
+SSH, an explicit request can use a display local to the server and its Docker
+Engine; SSH X11 forwarding such as `DISPLAY=localhost:10.0` is unsupported.
+
+Before creation, the launcher reports which desktop access it enables. Every
+launcher attach also displays the container's established mode inside tmux for
+up to eight seconds, followed by a persistent `GUI:WL`, `GUI:X11`, or `GUI:off`
+status prefix (`WL` means Wayland). Pressing a key dismisses the notice sooner.
+The prefix preserves the existing Byobu status content and is not duplicated
+on reattach. It reports configured access, not a successful clipboard test.
+These notices work with existing images and sessions; the launcher does not
+write a tmux configuration file or type commands into an active pane.
 
 X11 requires the host `xauth` command. The launcher copies only the active
 display credentials into a private file under the user's XDG state directory;
@@ -192,6 +212,10 @@ GUI access is part of the Docker container configuration. It cannot be added,
 removed, or switched by attaching to an existing running container. Later bare
 `myCodex` invocations simply attach and preserve the established mode; they do
 not need `--gui` again. `start` and `restart` also preserve the existing mounts.
+Existing headless containers stay headless, including on plain `up -d`. When a
+local desktop is detected while attaching to one, the notice explains how to
+enable access explicitly. A stopped container is started with its existing
+configuration unless other requested options require reconciliation.
 
 Change an established mode through an explicit Compose reconciliation:
 
@@ -207,13 +231,21 @@ so it cannot silently remove GUI access; repeat the current `--gui=<backend>`
 when updating its image or other configuration. `myCodex pull` never recreates
 the container.
 
-GUI access weakens the default isolation boundary: an agent with access to the
-display protocol can interact with or observe parts of the desktop session.
-The integration remains opt-in and retains Docker bridge networking. It does
-not forward host networking, D-Bus, audio, GPU devices, or the rest of the
+GUI access allows an agent to interact with or observe parts of the desktop
+session; mounting a display socket read-only does not make desktop access
+read-only. Use `--no-gui` to retain the headless isolation boundary for a new
+container, or `myCodex --no-gui up -d` to remove established GUI access (which
+may end its tmux session). The integration retains Docker bridge networking.
+It does not forward host networking, D-Bus, audio, GPU devices, or the rest of the
 desktop runtime directory. This initial implementation supports a local Docker
 daemon and local graphical session; SSH-specific forwarding and remote Docker
-daemons are outside its scope.
+daemons are outside its scope. `info` reports the requested policy, detected
+backend, detection reason, and established container mode without preparing
+credentials. Management commands such as `ps`, `logs`, `stop`, `restart`, and
+`pull` do not detect or prepare desktop access. GUI options apply to container
+creation/reconciliation (`myCodex`, `up`, `create`, and `run`). `config` renders
+the base configuration and any user-supplied overrides; an explicit GUI flag
+also renders the selected display overrides without copying credentials.
 
 Mount additional directories:
 
@@ -550,12 +582,14 @@ The wrapper owns these values; users normally should not set them directly:
 │   ├── myCodex
 │   ├── build-codex-image.sh
 │   └── lib
-│       └── mycodex-image.sh
+│       ├── mycodex-image.sh
+│       └── mycodex-tmux.sh
 └── tests
     ├── image-versioning_test.sh
     ├── launcher-config_test.sh
     ├── launcher-gui_test.sh
-    └── launcher-lifecycle_test.sh
+    ├── launcher-lifecycle_test.sh
+    └── tmux-gui_test.py
 ```
 
 - `Dockerfile` builds the agent workstation image.
@@ -563,13 +597,15 @@ The wrapper owns these values; users normally should not set them directly:
   an automatic image revision.
 - `docker-compose.yaml` defines the `codex` service, workspace mount, and
   persistent state volume.
-- `docker-compose.gui-*.yaml` add the explicitly selected local display socket
+- `docker-compose.gui-*.yaml` add the selected local display socket
   and environment without changing the base network configuration.
 - `entrypoint.sh` creates the persistent Byobu/tmux session and keeps the
   container alive.
 - `bin/myCodex` is the primary launcher and Compose wrapper.
 - `bin/build-codex-image.sh` builds and tags the workstation image.
 - `bin/lib/mycodex-image.sh` contains shared image tag discovery helpers.
+- `bin/lib/mycodex-tmux.sh` displays attach notices and the session GUI indicator
+  inside existing containers, without requiring an image rebuild.
 - `.github/workflows/ci.yml` runs shell and behavioral regression tests.
 - `.github/workflows/publish-codex-image.yml` publishes revisioned multi-platform
   image releases.
