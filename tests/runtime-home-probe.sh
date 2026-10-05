@@ -2,14 +2,18 @@
 # Runs inside the integration image, as the user selected by the entrypoint.
 set -euo pipefail
 [[ "$(id -u)" == "$MYCODEX_HOST_UID" && "$(id -g)" == "$MYCODEX_HOST_GID" ]]
-[[ "$(stat -c '%u:%g:%a' /etc/mycodex/bashrc)" == 0:0:644 ]]
+if [[ "${MYCODEX_TEST_LEGACY_IMAGE:-0}" == 1 ]]; then
+  [[ ! -e /etc/mycodex/bashrc ]]
+else
+  [[ "$(stat -c '%u:%g:%a' /etc/mycodex/bashrc)" == 0:0:644 ]]
+  if grep -Fq /home/vscode /usr/local/bin/entrypoint.sh; then exit 1; fi
+fi
 [[ "$(stat -c '%u:%g:%a' /etc/mycodex)" == 0:0:755 ]]
 [[ "$(stat -c '%u:%g' "$HOME/.bashrc")" == "$MYCODEX_HOST_UID:$MYCODEX_HOST_GID" ]]
-if grep -Fq /home/vscode /usr/local/bin/entrypoint.sh; then exit 1; fi
 
 case "$MYCODEX_TEST_SCENARIO" in
   fresh|old-marker)
-    grep -Fxq '. /etc/mycodex/bashrc' "$HOME/.bashrc"
+    grep -Fq '. /etc/mycodex/bashrc' "$HOME/.bashrc"
     [[ -s "$HOME/.profile" ]]
     ;;
   empty) [[ ! -s "$HOME/.bashrc" ]] ;;
@@ -23,10 +27,14 @@ esac
 
 # Inspect real first/new/split shells. Send assertions only into test-owned
 # panes, and wait for marker files so a dead shell cannot look like a success.
-first="$(tmux display-message -p -t codex: '#{pane_id}')"
+panes=()
+if [[ "${MYCODEX_TEST_SKIP_INITIAL_PANE:-0}" != 1 ]]; then
+  panes+=("$(tmux display-message -p -t codex: '#{pane_id}')")
+fi
 second="$(tmux new-window -P -F '#{pane_id}' -t codex -c /workspace)"
 third="$(tmux split-window -P -F '#{pane_id}' -t "$second" -c /workspace)"
-for pane in "$first" "$second" "$third"; do
+panes+=("$second" "$third")
+for pane in "${panes[@]}"; do
   marker="/tmp/shell-probe-${pane#%}"
   # shellcheck disable=SC2016 # These assertions execute in the pane shell.
   check='[[ $- == *i* ]] && shopt -q login_shell && [[ "$(id -u)" == "$MYCODEX_HOST_UID" ]]'
@@ -49,6 +57,7 @@ for pane in "$first" "$second" "$third"; do
     tmux capture-pane -p -t "$pane" >&2
     exit 1
   fi
-  if tmux capture-pane -p -t "$pane" | grep -Fq 'Permission denied'; then exit 1; fi
+  if tmux capture-pane -p -t "$pane" | grep -Eq 'Permission denied|No such file or directory'; then exit 1; fi
 done
-printf 'PASS: %s:%s %s\n' "$MYCODEX_HOST_UID" "$MYCODEX_HOST_GID" "$MYCODEX_TEST_SCENARIO"
+printf 'PASS: %s:%s %s (legacy image: %s)\n' \
+  "$MYCODEX_HOST_UID" "$MYCODEX_HOST_GID" "$MYCODEX_TEST_SCENARIO" "${MYCODEX_TEST_LEGACY_IMAGE:-0}"

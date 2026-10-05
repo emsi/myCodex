@@ -369,7 +369,12 @@ create_missing() {
 
 create_missing "$HOME/.bashrc" <<'RC'
 # Shared myCodex defaults. Add personal settings below this line.
-. /etc/mycodex/bashrc
+if [ -r /etc/mycodex/bashrc ]; then
+    . /etc/mycodex/bashrc
+elif [ -r /etc/skel/.bashrc ]; then
+    # Containers on older images may still share this home.
+    . /etc/skel/.bashrc
+fi
 RC
 
 # Bash reads only the first login file; do not bypass a user's chosen profile.

@@ -54,13 +54,27 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Build the workstation image
         run: |
           docker build -t mycodex-runtime-test \
             --build-arg INSTALL_CLAUDE_CODE=0 \
             --build-arg INSTALL_GEMINI_CLI=0 \
             --build-arg INSTALL_OPENCODE=0 .
+      - name: Build the pre-change image for shared-home compatibility tests
+        run: |
+          legacy_context="$(mktemp -d)"
+          trap 'rm -rf "$legacy_context"' EXIT
+          # Last master revision before the shared Bash defaults were added.
+          legacy_revision=a97fd81d48d5fe136eb8ff9bc8f9c5d38b040cc5
+          git show "$legacy_revision:Dockerfile" >"$legacy_context/Dockerfile"
+          git show "$legacy_revision:entrypoint.sh" >"$legacy_context/entrypoint.sh"
+          docker build -t mycodex-runtime-legacy-test \
+            --build-arg INSTALL_CLAUDE_CODE=0 \
+            --build-arg INSTALL_GEMINI_CLI=0 \
+            --build-arg INSTALL_OPENCODE=0 "$legacy_context"
       - name: Test runtime identities and shell initialization
-        run: bash tests/runtime-home_test.sh mycodex-runtime-test
+        run: bash tests/runtime-home_test.sh mycodex-runtime-test mycodex-runtime-legacy-test
       - name: Test real Compose image reconciliation
         run: bash tests/compose-lifecycle_test.sh mycodex-runtime-test

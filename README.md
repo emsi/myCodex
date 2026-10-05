@@ -353,6 +353,11 @@ Shared Bash defaults live at `/etc/mycodex/bashrc`, owned by root and readable
 by every runtime UID/GID. They use the distribution's shell defaults, including
 history, aliases and completion. On every startup, including existing home
 volumes, the entrypoint creates a missing `$HOME/.bashrc` that sources this file.
+On older images where the shared file is absent, that `.bashrc` falls back to
+the distribution defaults at `/etc/skel/.bashrc`. This lets containers still
+running older images share the home with updated containers without a missing-file
+error. Existing shells keep their current settings; new shells use the defaults
+available in the image they run in.
 It installs a default `.profile` only when no `.bash_profile`, `.bash_login` or
 `.profile` exists. Existing files, including empty files and symlinks, retain
 their contents and ownership; user profiles control their own startup behavior.
