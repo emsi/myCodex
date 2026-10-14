@@ -21,18 +21,18 @@ jobs:
       - name: Check shell syntax
         run: |
           bash -n entrypoint.sh bin/myCodex bin/build-codex-image.sh \
-            bin/lib/mycodex-image.sh bin/lib/mycodex-tmux.sh tests/image-versioning_test.sh \
+            bin/lib/mycodex-image.sh bin/lib/mycodex-tmux.sh bin/lib/mycodex-gpu.sh tests/image-versioning_test.sh \
             tests/launcher-config_test.sh tests/launcher-gui_test.sh \
             tests/launcher-lifecycle_test.sh tests/runtime-home_test.sh tests/runtime-home-probe.sh \
-            tests/compose-lifecycle_test.sh
+            tests/compose-lifecycle_test.sh tests/runtime-gpu_test.sh
 
       - name: Run ShellCheck
         run: |
           shellcheck -x entrypoint.sh bin/myCodex bin/build-codex-image.sh \
-            bin/lib/mycodex-image.sh bin/lib/mycodex-tmux.sh tests/image-versioning_test.sh \
+            bin/lib/mycodex-image.sh bin/lib/mycodex-tmux.sh bin/lib/mycodex-gpu.sh tests/image-versioning_test.sh \
             tests/launcher-config_test.sh tests/launcher-gui_test.sh \
             tests/launcher-lifecycle_test.sh tests/runtime-home_test.sh tests/runtime-home-probe.sh \
-            tests/compose-lifecycle_test.sh
+            tests/compose-lifecycle_test.sh tests/runtime-gpu_test.sh
 
       - name: Test image versioning
         run: ./tests/image-versioning_test.sh
@@ -42,6 +42,9 @@ jobs:
 
       - name: Test launcher GUI integration
         run: ./tests/launcher-gui_test.sh
+
+      - name: Test launcher GPU integration
+        run: MYCODEX_TEST_COMPOSE="$(command -v docker) compose" python3 tests/launcher-gpu_test.py
 
       - name: Test tmux GUI visibility
         run: python3 tests/tmux-gui_test.py
@@ -73,3 +76,5 @@ jobs:
         run: python3 tests/launcher-image-compat_test.py mycodex-runtime-test "$MYCODEX_COMPAT_IMAGE"
       - name: Test real Compose image reconciliation
         run: bash tests/compose-lifecycle_test.sh mycodex-runtime-test
+      - name: Test device permissions through the non-root entrypoint
+        run: bash tests/runtime-gpu_test.sh mycodex-runtime-test

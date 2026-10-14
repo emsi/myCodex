@@ -63,6 +63,7 @@ case "${1:-} ${2:-}" in
       *config-hash*) printf '%s\n' "${FAKE_CURRENT_HASH:-${FAKE_HASH}}" ;;
       *mycodex.codex.version*) printf '%s\n' "${FAKE_LABEL_CODEX_VERSION-${FAKE_CURRENT_CODEX_VERSION:-0.147.0}}" ;;
       *mycodex.gui*) printf 'none\n' ;;
+      *mycodex.gpu*) printf '<no value>\n' ;;
       *) exit 1 ;;
     esac
     ;;

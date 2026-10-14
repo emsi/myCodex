@@ -85,6 +85,8 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${SCRIPT_PATH}")" && pwd)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 # shellcheck source=bin/lib/mycodex-image.sh
 source "${SCRIPT_DIR}/lib/mycodex-image.sh"
+# shellcheck source=bin/lib/mycodex-gpu.sh
+source "${SCRIPT_DIR}/lib/mycodex-gpu.sh"
 
 COMPOSE_FILE="${PROJECT_ROOT}/docker-compose.yaml"
 GUI_X11_COMPOSE_FILE="${PROJECT_ROOT}/docker-compose.gui-x11.yaml"
@@ -143,6 +145,8 @@ Options:
   --private-env                      Use a per-project Codex state volume
   --gui[=auto|x11|wayland]            Require local GUI access (new containers auto-detect by default)
   --no-gui                           Explicitly select headless operation
+  --gpu[=auto|nvidia|amd|intel]       Enable GPUs on creation, then attach (vendors can be comma-separated)
+  --no-gpu                           Disable GPU access on creation
   -v, --volume <spec>                Add an extra Docker-style volume mount
   -f, --compose-file <path>          Add an extra Compose override file
 EOF
@@ -276,6 +280,9 @@ cleanup() {
   if [[ -n "${GUI_TEMP_FILE}" ]]; then
     rm -f -- "${GUI_TEMP_FILE}"
   fi
+  if [[ -n "${GPU_COMPOSE_FILE}" ]]; then
+    rm -f -- "${GPU_COMPOSE_FILE}"
+  fi
 }
 trap cleanup EXIT
 
@@ -357,6 +364,18 @@ while [[ $# -gt 0 ]]; do
       ;;
     --no-gui)
       set_gui_request none
+      shift
+      ;;
+    --gpu)
+      set_gpu_request auto
+      shift
+      ;;
+    --gpu=*)
+      set_gpu_request "${1#--gpu=}"
+      shift
+      ;;
+    --no-gpu)
+      set_gpu_request none
       shift
       ;;
     -v|--volume)
@@ -484,7 +503,7 @@ wayland_socket_for_display() {
   printf '%s\n' "${socket}"
 }
 
-local_gui_daemon() {
+local_docker_daemon() {
   local endpoint context daemon_os
 
   # A client-side socket cannot be bind-mounted by a remote daemon. Respect
@@ -527,7 +546,7 @@ detect_gui_mode() {
     GUI_REASON="automatic desktop forwarding is disabled over SSH; use --gui for a server-local display"
     return
   fi
-  if ! local_gui_daemon; then
+  if ! local_docker_daemon; then
     GUI_REASON="desktop forwarding requires a verified local Docker Engine (remote daemons and Docker Desktop are unsupported)"
     return
   fi
@@ -755,6 +774,9 @@ compose_args() {
   if [[ -n "${GUI_COMPOSE_FILE}" ]]; then
     printf '%s\n' -f "${GUI_COMPOSE_FILE}"
   fi
+  if [[ -n "${GPU_COMPOSE_FILE}" ]]; then
+    printf '%s\n' -f "${GPU_COMPOSE_FILE}"
+  fi
   for file in "${ADDITIONAL_COMPOSE_FILES[@]}"; do
     printf '%s\n' -f "${file}"
   done
@@ -789,7 +811,7 @@ run_docker_compose() {
     MYCODEX_HOST_GID="${HOST_GID}" \
     MYCODEX_HOST_USER="${HOST_USER}" \
     MYCODEX_HOST_GROUP="${HOST_GROUP}" \
-    MYCODEX_HOST_GROUPS="${HOST_GROUPS}" \
+    MYCODEX_HOST_GROUPS="${GPU_HOST_GROUPS:-${HOST_GROUPS}}" \
     MYCODEX_CONTAINER_HOME="${CONTAINER_HOME}" \
     MYCODEX_WORKDIR="${CONTAINER_WORKDIR}" \
     MYCODEX_CODEX_HOME="${CONTAINER_HOME}/.codex" \
@@ -934,6 +956,7 @@ stopped_configuration_matches() {
   fi
   prepare_gui 1
   [[ "${GUI_MODE}" == "${current_gui}" ]] || return 1
+  restore_gpu && write_gpu_override || return 1
 
   # Compose's own hash covers mounts, environment, image reference and service
   # options. Missing flags, old metadata or unsupported Compose versions fail
@@ -1204,6 +1227,7 @@ remove_state_volume() {
 run_up() {
   local -a args
 
+  prepare_gpu
   guard_reconcile_gui_mode
   prepare_gui
 
@@ -1240,6 +1264,7 @@ run_up() {
 run_create() {
   local -a args=("$@")
 
+  prepare_gpu
   guard_reconcile_gui_mode
   prepare_gui
 
@@ -1291,11 +1316,13 @@ run_down() {
 run_default() {
   local current_gui
 
+  guard_existing_gpu
   if ! is_running; then
     if container_exists \
       && [[ "${RECONCILE_REQUIRED}" != 1 ]]; then
       start_stopped_container
     else
+      prepare_gpu
       guard_reconcile_gui_mode
       prepare_gui
       prepare_start_image
@@ -1308,6 +1335,7 @@ run_default() {
       if [[ "${current_gui}" != none && "${GUI_OPTION_SPECIFIED}" != 1 ]]; then
         die "container ${CONTAINER_NAME} uses GUI mode ${current_gui}; repeat '--gui=${current_gui}' to preserve it during reconciliation"
       fi
+      prepare_gpu
       prepare_gui
       start_stack
     fi
@@ -1321,16 +1349,19 @@ run_default() {
 # container. Values reflect the options given on the same command line (e.g.
 # --private-env changes the state volume name).
 print_info() {
-  local image_ref vol_state vol_created vol_mount requested_gui running_gui
+  local image_ref vol_state vol_created vol_mount requested_gui running_gui running_gpu
 
   image_ref="${IMAGE_NAME}:${IMAGE_TAG}"
   requested_gui="${GUI_REQUEST:-auto (default)}"
   detect_gui_mode
   if container_exists; then
     running_gui="$(container_gui_mode)"
+    running_gpu="$(container_gpu_mode)" || running_gpu="unknown (inspection failed)"
   else
     running_gui="no container"
+    running_gpu="no container"
   fi
+  if [[ "${GPU_OPTION_SPECIFIED}" == 1 ]]; then detect_gpu || true; fi
 
   if ! command -v docker >/dev/null 2>&1; then
     vol_state="docker not available"
@@ -1352,6 +1383,15 @@ print_info() {
   printf '  GUI detected      %s\n' "${GUI_MODE}"
   printf '  GUI reason        %s\n' "${GUI_REASON}"
   printf '  container GUI     %s\n' "${running_gui}"
+  if [[ "${GPU_OPTION_SPECIFIED}" == 1 ]]; then
+    printf '  GPU requested     %s\n' "${GPU_REQUEST}"
+    printf '  GPU detected      %s\n' "${GPU_MODE}"
+    printf '  GPU reason        %s\n' "${GPU_REASON}"
+    printf '  GPU devices       %s\n' "${GPU_DEVICES[*]:-none}"
+  else
+    printf '  GPU requested     preserve existing; off for new containers\n'
+  fi
+  printf '  container GPU     %s\n' "${running_gpu}"
   printf '  workspace (host)  %s\n' "${CALLER_DIR}"
   printf '  workdir (in ctr)  %s\n' "${CONTAINER_WORKDIR}"
   printf '  home (in ctr)     %s\n' "${CONTAINER_HOME}"
@@ -1394,10 +1434,12 @@ case "${subcommand}" in
     usage
     ;;
   attach)
+    guard_existing_gpu
     guard_attach_gui_mode
     attach_with_update_check
     ;;
   notices)
+    guard_existing_gpu
     guard_attach_gui_mode
     attach_tmux 1
     ;;
@@ -1408,6 +1450,7 @@ case "${subcommand}" in
     compose ps "$@"
     ;;
   start)
+    guard_existing_gpu
     if [[ $# -eq 0 ]]; then
       compose start "${SERVICE}"
     else
@@ -1422,6 +1465,7 @@ case "${subcommand}" in
     fi
     ;;
   restart)
+    guard_existing_gpu
     if [[ $# -eq 0 ]]; then
       compose restart "${SERVICE}"
     else
@@ -1429,6 +1473,7 @@ case "${subcommand}" in
     fi
     ;;
   exec)
+    guard_existing_gpu
     if [[ $# -eq 0 ]]; then
       echo "myCodex: exec requires a command" >&2
       usage >&2
@@ -1451,11 +1496,13 @@ case "${subcommand}" in
     run_create "$@"
     ;;
   run)
+    prepare_gpu
     guard_reconcile_gui_mode
     prepare_gui
     compose run "$@"
     ;;
   config)
+    if [[ "${GPU_OPTION_SPECIFIED}" == 1 ]]; then prepare_gpu; fi
     # Render explicit GUI overrides without copying credentials or creating
     # state. The authorization path is the one creation would later prepare.
     if [[ "${GUI_OPTION_SPECIFIED}" == 1 ]]; then

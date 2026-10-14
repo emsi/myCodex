@@ -254,6 +254,84 @@ creation/reconciliation (`myCodex`, `up`, `create`, and `run`). `config` renders
 the base configuration and any user-supplied overrides; an explicit GUI flag
 also renders the selected display overrides without copying credentials.
 
+### GPU Access
+
+GPU access is opt-in and supports NVIDIA, AMD, and Intel on a **local native
+Linux Docker Engine**. Start and attach through the normal launcher:
+
+```bash
+myCodex --gpu                 # Detect and expose supported GPUs, then attach
+myCodex --gpu=nvidia          # NVIDIA only
+myCodex --gpu=amd             # AMD only
+myCodex --gpu=intel           # Intel only
+myCodex --gpu=nvidia,intel    # Select multiple vendors
+myCodex                      # Later launches preserve existing GPU access
+```
+
+`--gpu` and `--gpu=auto` select every detected supported vendor. Explicit vendor
+selections include all its available GPUs. GPU flags do not recreate an existing
+container or interrupt its session. To change access on an existing container:
+
+```bash
+myCodex down
+myCodex --gpu
+```
+
+To remove access, use `myCodex down` followed by `myCodex --no-gpu` (or simply
+`myCodex`, since GPU access defaults to off for new containers). `down` ends the
+current session; the normal home volume is retained. Repeat the GPU option after
+`down` when creating another GPU-enabled container. `--gpu` on an existing
+GPU-enabled container preserves its established selection; changing vendors also
+requires `down` first.
+
+| Vendor | Host prerequisites | Container access |
+| --- | --- | --- |
+| NVIDIA | A working NVIDIA driver (`nvidia-smi -L`) and NVIDIA Container Toolkit configured with Docker's `nvidia` runtime | NVIDIA GPU reservation, with compute, utility, graphics, video, and display driver capabilities |
+| AMD | Working AMD driver and render nodes under `/dev/dri` | AMD render nodes, plus `/dev/kfd` when present for ROCm compute |
+| Intel | Working Intel driver and render nodes under `/dev/dri` | Intel render nodes |
+
+Missing prerequisites fail creation with an explanation. AMD rendering can work
+without `/dev/kfd`; the launcher reports that ROCm compute is unavailable in that
+case. Auto mode fails if a detected vendor cannot be configured; explicitly
+select another vendor to expose only that hardware. Device ownership groups are
+imported by numeric ID into the runtime user's account, so permissions survive
+the entrypoint's `gosu` switch. GPU access does not enable privileged mode or
+disable Docker's seccomp filter.
+
+Device access and application libraries are separate. The host supplies the
+kernel driver; applications in the container still need compatible libraries:
+Mesa/OpenGL/Vulkan for AMD or Intel graphics, CUDA runtime libraries for NVIDIA
+compute, ROCm for AMD compute, or Intel OpenCL/Level Zero for Intel compute.
+Install the libraries required by your project or include them in a derived
+workstation image. The launcher does not install drivers or GPU toolchains.
+NVIDIA's toolkit injects its host driver components. GPU access itself requires
+no myCodex image rebuild.
+
+GPU and desktop access are independent. Use `myCodex --gpu --no-gui` for headless
+compute, or combine `--gpu` with `--gui=x11` / `--gui=wayland` when creating a
+container for graphical applications. Existing GUI lifecycle rules still apply.
+
+`myCodex info` shows the established GPU mode; `myCodex --gpu info` also probes
+available hardware without creating a container. `myCodex --gpu config` renders
+the GPU Compose override. Bare reattach and management commands do not probe GPU
+hardware. Image updates preserve the recorded AMD/Intel device paths, including
+whether `/dev/kfd` was enabled; NVIDIA reservations continue to expose all NVIDIA
+GPUs. If a stopped container's configuration cannot be reproduced, it is started
+with its original configuration instead of being replaced.
+
+Remote Docker contexts and Docker Desktop are outside this automatic discovery
+path. Advanced device selection or CDI configurations can still be supplied using
+`-f` Compose overrides, with their required runtime-user permissions. Actual
+acceleration must be checked with a workload as the container user; device
+visibility alone does not establish that the application's GPU runtime works.
+
+References: [Docker Compose GPU reservations](https://docs.docker.com/compose/how-tos/gpu-support/),
+[NVIDIA driver capabilities](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/docker-specialized.html),
+[AMD container device access](https://rocm.docs.amd.com/projects/install-on-linux/en/latest/how-to/docker.html),
+and [Intel container setup](https://www.intel.com/content/www/us/en/docs/distribution-for-gdb/tutorial-debugging-dpcpp-linux/2025-3/using-intel-distribution-for-gdb-with-docker.html).
+
+### Additional Mounts And Compose Overrides
+
 Mount additional directories:
 
 ```bash
@@ -621,13 +699,16 @@ The wrapper owns these values; users normally should not set them directly:
 │   ├── myCodex
 │   ├── build-codex-image.sh
 │   └── lib
+│       ├── mycodex-gpu.sh
 │       ├── mycodex-image.sh
 │       └── mycodex-tmux.sh
 └── tests
     ├── image-versioning_test.sh
     ├── launcher-config_test.sh
     ├── launcher-gui_test.sh
+    ├── launcher-gpu_test.py
     ├── launcher-lifecycle_test.sh
+    ├── runtime-gpu_test.sh
     └── tmux-gui_test.py
 ```
 
@@ -643,13 +724,15 @@ The wrapper owns these values; users normally should not set them directly:
 - `bin/myCodex` is the primary launcher and Compose wrapper.
 - `bin/build-codex-image.sh` builds and tags the workstation image.
 - `bin/lib/mycodex-image.sh` contains shared image tag discovery helpers.
+- `bin/lib/mycodex-gpu.sh` detects GPU devices, generates Compose overrides, and
+  preserves device access and runtime-user groups across launches.
 - `bin/lib/mycodex-tmux.sh` displays attach notices and the session GUI indicator
   inside existing containers, without requiring an image rebuild.
 - `.github/workflows/ci.yml` runs shell and behavioral regression tests.
 - `.github/workflows/publish-codex-image.yml` publishes revisioned multi-platform
   image releases.
 - `tests/` covers release/version behavior and launcher configuration,
-  lifecycle, and GUI security contracts.
+  lifecycle, GUI security contracts, and GPU configuration/device permissions.
 
 ## Publishing Checklist
 

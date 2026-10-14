@@ -92,6 +92,7 @@ case "${1:-} ${2:-}" in
   "inspect --format")
     [[ "${FAKE_CONTAINER_EXISTS:-0}" == 1 || -f "${FAKE_GUI_STATE}" ]] || exit 1
     case "$3" in
+      *io.infrasecture.mycodex.gpu*) printf '<no value>\n' ;;
       *io.infrasecture.mycodex.gui*)
         if [[ -f "${FAKE_GUI_STATE}" ]]; then cat "${FAKE_GUI_STATE}"; else printf '%s\n' "${FAKE_GUI_MODE:-none}"; fi
         ;;
