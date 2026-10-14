@@ -92,7 +92,8 @@ with tempfile.TemporaryDirectory(prefix="mycodex-image-compat.") as directory:
                     assert inside("tmux", "list-clients", "-F", "#{client_tty}")
                     if popup:
                         report = inside("tmux", "show-options", "-qv", "-t", "codex", "@mycodex-notices")
-                        assert "9999.0.0" in report and "GUI access disabled" in report, report
+                        assert "9999.0.0" in report and "GUI:off GPU:off" in report, report
+                        assert inside("tmux", "show-options", "-qv", "-t", "codex", "@mycodex-gpu") == "GPU:off"
                         os.write(fd, b"q")
                     else:
                         os.write(fd, b"\x1b")

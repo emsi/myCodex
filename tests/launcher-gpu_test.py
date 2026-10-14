@@ -184,6 +184,11 @@ class GpuLauncherTest(unittest.TestCase):
     def commands(self):
         return [call['compose'][0] for call in self.calls() if 'compose' in call]
 
+    def attach_arguments(self):
+        command = next(call['compose'] for call in reversed(self.calls())
+                       if call.get('compose', [''])[0] == 'exec')
+        return command[command.index('mycodex-tmux') + 1:]
+
     def launch(self, *args, success=True):
         result = subprocess.run(['bash', str(self.source / 'bin/myCodex'), *args],
                                 cwd=self.work, env=self.env, text=True,
@@ -204,6 +209,8 @@ class GpuLauncherTest(unittest.TestCase):
         self.assertEqual(self.state()['gpu'], 'none')
         self.assertEqual(self.commands(), ['ps', 'up', 'exec'])
         self.assertFalse(self.override.exists())
+        self.assertEqual(self.attach_arguments()[2], 'GUI:off GPU:off')
+        self.assertEqual(self.attach_arguments()[5], 'GPU:off')
 
     def test_amd_starts_attaches_and_imports_device_groups(self):
         self.amd()
@@ -211,6 +218,9 @@ class GpuLauncherTest(unittest.TestCase):
         self.assertEqual(self.state()['gpu'], 'amd')
         self.assertEqual(self.state()['devices'], '/dev/dri/renderD128,/dev/kfd')
         self.assertEqual(self.commands(), ['ps', 'up', 'exec'])
+        self.assertEqual(self.attach_arguments()[2], 'GUI:off GPU:AMD')
+        self.assertIn('GPU amd: device access configured', self.attach_arguments()[3])
+        self.assertEqual(self.attach_arguments()[5], 'GPU:AMD')
         up = next(call for call in self.calls() if call.get('compose', [''])[0] == 'up')
         self.assertIn('24680:gpu-24680', up['groups'])
         self.assertIn('24681:gpu-24681', up['groups'])
@@ -253,6 +263,7 @@ class GpuLauncherTest(unittest.TestCase):
         output = self.launch('--gpu=amd')
         self.assertIn('ROCm compute is unavailable', output)
         self.assertNotIn('/dev/kfd', self.state()['devices'])
+        self.assertIn('ROCm compute is unavailable', self.attach_arguments()[3])
 
     def test_gpu_and_wayland_can_be_combined(self):
         self.amd()
@@ -323,10 +334,27 @@ class GpuLauncherTest(unittest.TestCase):
         self.set_state(exists=True, running=True, gpu='amd', devices='/dev/dri/renderD128')
         for args in [(), ('--gpu',), ('--gpu=amd',), ('--gpu', 'attach')]:
             self.launch(*args)
+            self.assertEqual(self.attach_arguments()[2], 'GUI:off GPU:AMD')
+            self.assertEqual(self.attach_arguments()[3], '')
+            self.assertEqual(self.attach_arguments()[5], 'GPU:AMD')
         self.assertNotIn('up', self.commands())
         self.assertNotIn('pull', self.commands())
         self.assertEqual(self.commands().count('exec'), 4)
         self.assertFalse(any(call.get('docker', [''])[0] in ('context', 'info') for call in self.calls()))
+
+    def test_attach_badges_report_saved_modes_and_unknown_inspection(self):
+        for mode, badge in [('none', 'off'), ('intel', 'INTEL'), ('nvidia', 'NVIDIA'),
+                            ('amd,intel,nvidia', 'AMD,INTEL,NVIDIA'),
+                            ('invalid-#{pane_id}', '?')]:
+            with self.subTest(mode=mode):
+                self.set_state(exists=True, running=True, gpu=mode, gui='x11')
+                self.launch()
+                self.assertEqual(self.attach_arguments()[2], f'GUI:X11 GPU:{badge}')
+                self.assertEqual(self.attach_arguments()[5], f'GPU:{badge}')
+        self.env['TEST_INSPECT_FAILURE'] = '1'
+        self.launch()
+        self.assertEqual(self.attach_arguments()[2], 'GUI:X11 GPU:?')
+        self.assertNotIn('up', self.commands())
 
     def test_disabling_gpu_requires_down(self):
         self.set_state(exists=True, running=True, gpu='intel', devices='/dev/dri/renderD128')

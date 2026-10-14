@@ -189,15 +189,16 @@ Engine; SSH X11 forwarding such as `DISPLAY=localhost:10.0` is unsupported.
 
 Before creation, the launcher reports which desktop access it enables. Every
 launcher attach also displays the container's established mode inside tmux for
-up to eight seconds, followed by a persistent `GUI:WL`, `GUI:X11`, or `GUI:off`
-status prefix (`WL` means Wayland). Pressing a key dismisses the notice sooner.
+up to eight seconds, followed by a persistent GUI/GPU status prefix such as
+`GUI:WL GPU:AMD`, `GUI:X11 GPU:NVIDIA`, or `GUI:off GPU:off`
+(`WL` means Wayland). Pressing a key dismisses the notice sooner.
 The prefix preserves the existing Byobu status content and is not duplicated
 on reattach. It reports configured access, not a successful clipboard test.
 These notices work with existing images and sessions; the launcher does not
 write a tmux configuration file or type commands into an active pane.
 
-Update reports and offline-image warnings appear in a scrollable tmux popup
-after attachment. They stay open until you press `q`, survive applications
+GPU setup notes, update reports, and offline-image warnings appear in a scrollable
+tmux popup after attachment. They stay open until you press `q`, survive applications
 that clear the terminal, and can be reopened with `myCodex notices`. The last
 report is kept in the tmux session until that session ends. Other clients and
 the running application keep their screens and input.
@@ -310,6 +311,15 @@ no myCodex image rebuild.
 GPU and desktop access are independent. Use `myCodex --gpu --no-gui` for headless
 compute, or combine `--gpu` with `--gui=x11` / `--gui=wayland` when creating a
 container for graphical applications. Existing GUI lifecycle rules still apply.
+
+Every attach repeats the configured GUI/GPU modes inside tmux, with a persistent
+badge such as `GUI:off GPU:AMD`. Multiple vendors appear as `GPU:AMD,INTEL,NVIDIA`;
+`GPU:off` means no managed GPU access, and `GPU:?` means the configuration could
+not be determined. Setup notes, including missing ROCm compute support, appear
+after attachment in the notice popup and remain available through `myCodex notices`.
+These indicators report configured access, not measured GPU activity or a
+successful acceleration test. Existing sessions get the badges on the next attach;
+no image rebuild or container recreation is needed.
 
 `myCodex info` shows the established GPU mode; `myCodex --gpu info` also probes
 available hardware without creating a container. `myCodex --gpu config` renders
@@ -709,6 +719,7 @@ The wrapper owns these values; users normally should not set them directly:
     ├── launcher-gpu_test.py
     ├── launcher-lifecycle_test.sh
     ├── runtime-gpu_test.sh
+    ├── tmux-gpu_test.py
     └── tmux-gui_test.py
 ```
 

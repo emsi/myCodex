@@ -331,7 +331,7 @@ WAYLAND_DISPLAY=wayland-test XDG_RUNTIME_DIR="${tmp_dir}/runtime" \
   run_launcher >"${tmp_dir}/automatic.out" 2>&1
 assert_contains "${FAKE_COMPOSE_LOG}" "docker-compose.gui-wayland.yaml"
 assert_contains "${tmp_dir}/automatic.out" "enabling GUI access (wayland)"
-assert_contains "${FAKE_COMPOSE_LOG}" "mycodex-tmux codex wayland GUI access enabled: Wayland"
+assert_contains "${FAKE_COMPOSE_LOG}" "mycodex-tmux codex wayland GUI:WL GPU:off"
 
 reset_logs
 DISPLAY=":${x11_display_number}" run_launcher create >"${tmp_dir}/automatic-x11.out" 2>&1
@@ -412,7 +412,7 @@ for action in attach start restart up; do
     run_launcher "${action}" >"${tmp_dir}/existing-${action}.out" 2>&1
   assert_not_contains "${FAKE_COMPOSE_LOG}" "docker-compose.gui-"
 done
-assert_contains "${tmp_dir}/existing-attach.out" "GUI off; desktop detected"
+assert_contains "${tmp_dir}/existing-attach.out" "GUI:off GPU:off; desktop detected"
 reset_logs
 DISPLAY=":${x11_display_number}" FAKE_CONTAINER_EXISTS=1 FAKE_RUNNING=0 \
   run_launcher >/dev/null 2>&1

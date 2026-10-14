@@ -139,6 +139,16 @@ container_gpu_mode() {
   case "${mode}" in ''|'<no value>') printf 'none\n' ;; *) printf '%s\n' "${mode}" ;; esac
 }
 
+gpu_status_badge() {
+  local mode
+  mode="$(normalize_gpu_request "$1")" || mode=unknown
+  case "${mode}" in
+    none) printf 'GPU:off\n' ;;
+    auto|unknown) printf 'GPU:?\n' ;;
+    *) printf 'GPU:%s\n' "${mode^^}" ;;
+  esac
+}
+
 guard_existing_gpu() {
   local current option
   [[ "${GPU_OPTION_SPECIFIED}" == 1 ]] || return 0
@@ -247,5 +257,5 @@ prepare_gpu() {
     detect_gpu || die "--gpu unavailable: ${GPU_REASON}"
   fi
   write_gpu_override || die "cannot prepare GPU access: ${GPU_REASON}"
-  if [[ "${GPU_MODE}" != none ]]; then printf 'myCodex: GPU %s: %s\n' "${GPU_MODE}" "${GPU_REASON}" >&2; fi
+  if [[ "${GPU_MODE}" != none ]]; then startup_notice "GPU ${GPU_MODE}: ${GPU_REASON}"; fi
 }

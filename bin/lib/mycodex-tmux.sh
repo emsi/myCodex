@@ -8,6 +8,11 @@ mode="$2"
 notice="$3"
 details="${4:-}"
 reopen="${5:-0}"
+# Optional for compatibility with callers of the original GUI-only helper.
+gpu_badge="${6:-}"
+if [[ -n "${gpu_badge}" && ! "${gpu_badge}" =~ ^GPU:(off|\?|[A-Z]+(,[A-Z]+)*)$ ]]; then
+  gpu_badge='GPU:?'
+fi
 
 case "${mode}" in
   x11) badge='GUI:X11' ;;
@@ -21,11 +26,20 @@ esac
 tmux set-option -t "${session}" @mycodex-gui "${badge}"
 left="$(tmux show-options -Av -t "${session}" status-left)"
 if [[ "${left}" != *'#{@mycodex-gui}'* ]]; then
-  tmux set-option -t "${session}" status-left '#{@mycodex-gui} '"${left}"
+  left='#{@mycodex-gui} '"${left}"
 fi
+badge_length=$((${#badge} + 1))
+if [[ -n "${gpu_badge}" ]]; then
+  tmux set-option -t "${session}" @mycodex-gpu "${gpu_badge}"
+  if [[ "${left}" != *'#{@mycodex-gpu}'* ]]; then
+    left="${left/'#{@mycodex-gui}'/'#{@mycodex-gui} #{@mycodex-gpu}'}"
+  fi
+  badge_length=$((badge_length + ${#gpu_badge} + 1))
+fi
+tmux set-option -t "${session}" status-left "${left}"
 length="$(tmux show-options -Av -t "${session}" status-left-length)"
-if (( length < 8 )); then
-  tmux set-option -t "${session}" status-left-length 8
+if (( length < badge_length )); then
+  tmux set-option -t "${session}" status-left-length "${badge_length}"
 fi
 
 # Retain the full text in the session, independent of pane scrollback and any

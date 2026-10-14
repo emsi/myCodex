@@ -49,6 +49,9 @@ jobs:
       - name: Test tmux GUI visibility
         run: python3 tests/tmux-gui_test.py
 
+      - name: Test tmux GPU visibility
+        run: python3 tests/tmux-gpu_test.py
+
       - name: Test launcher lifecycle
         run: ./tests/launcher-lifecycle_test.sh
 

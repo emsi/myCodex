@@ -1103,20 +1103,25 @@ attach_with_update_check() {
 }
 
 attach_tmux() {
-  local mode notice
+  local mode notice gpu_mode gpu_badge hint=""
 
   mode="$(container_gui_mode)"
   case "${mode}" in
-    x11) notice="GUI access enabled: X11" ;;
-    wayland) notice="GUI access enabled: Wayland" ;;
+    x11) notice="GUI:X11" ;;
+    wayland) notice="GUI:WL" ;;
     none)
-      notice="GUI access disabled (headless)"
+      notice="GUI:off"
       if [[ "${GUI_OPTION_SPECIFIED}" != 1 && "$(resolve_gui_mode)" != none ]]; then
-        notice="GUI off; desktop detected. Enable: myCodex --gui up -d (ends this session)"
+        hint="; desktop detected. Enable GUI: myCodex --gui up -d (ends this session)"
       fi
       ;;
-    *) mode=unknown; notice="GUI access: unknown container configuration" ;;
+    *) mode=unknown; notice="GUI:?" ;;
   esac
+  # Report the container's configured access on every attach, without probing
+  # host hardware or changing the running container.
+  gpu_mode="$(container_gpu_mode)" || gpu_mode=unknown
+  gpu_badge="$(gpu_status_badge "${gpu_mode}")"
+  notice+=" ${gpu_badge}${hint}"
   echo "myCodex: ${notice}" >&2
   compose exec -it "${SERVICE}" gosu "${HOST_USER}" \
     env \
@@ -1125,7 +1130,7 @@ attach_tmux() {
       LOGNAME="${HOST_USER}" \
       CODEX_HOME="${CONTAINER_HOME}/.codex" \
       bash -c "$(cat "${SCRIPT_DIR}/lib/mycodex-tmux.sh")" \
-        mycodex-tmux "${SESSION}" "${mode}" "${notice}" "${STARTUP_NOTICES}" "${1:-0}"
+        mycodex-tmux "${SESSION}" "${mode}" "${notice}" "${STARTUP_NOTICES}" "${1:-0}" "${gpu_badge}"
 }
 
 container_state() {
