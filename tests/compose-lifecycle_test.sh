@@ -62,4 +62,35 @@ bash "$root/bin/myCodex" stop
 bash "$root/bin/myCodex"
 [[ "$(docker inspect --format '{{.Id}}' "$CODEX_CONTAINER_NAME")" == "$old_container" ]]
 docker inspect --format '{{range .Mounts}}{{println .Destination}}{{end}}' "$CODEX_CONTAINER_NAME" | grep -Fxq /extra
-printf 'PASS: real Compose stopped-image replacement, running preservation, and omitted-mount guard\n'
+
+# Device options and rules reconcile a running container and survive bare attaches.
+docker tag "$image" "$MYCODEX_IMAGE_NAME:latest"
+bash "$root/bin/myCodex" \
+  --device /dev/null:/dev/mycodex-null:rw --device=/dev/zero \
+  --device-cgroup-rule='c 234:* rwm' --device-cgroup-rule 'b 8:* rw'
+docker inspect --format '{{json .HostConfig.Devices}}' "$CODEX_CONTAINER_NAME" \
+  | python3 -c '
+import json, sys
+devices = {device["PathInContainer"]: device for device in json.load(sys.stdin)}
+assert devices["/dev/mycodex-null"] == {
+    "PathOnHost": "/dev/null",
+    "PathInContainer": "/dev/mycodex-null",
+    "CgroupPermissions": "rw",
+}
+assert devices["/dev/zero"]["PathOnHost"] == "/dev/zero"
+assert devices["/dev/zero"]["CgroupPermissions"] == "rwm"
+'
+docker inspect --format '{{json .HostConfig.DeviceCgroupRules}}' "$CODEX_CONTAINER_NAME" \
+  | python3 -c '
+import json, sys
+assert set(json.load(sys.stdin)) == {"c 234:* rwm", "b 8:* rw"}
+'
+docker exec "$CODEX_CONTAINER_NAME" test -c /dev/mycodex-null
+current_container="$(docker inspect --format '{{.Id}}' "$CODEX_CONTAINER_NAME")"
+bash "$root/bin/myCodex"
+[[ "$(docker inspect --format '{{.Id}}' "$CODEX_CONTAINER_NAME")" == "$current_container" ]]
+bash "$root/bin/myCodex" stop
+bash "$root/bin/myCodex"
+[[ "$(docker inspect --format '{{.Id}}' "$CODEX_CONTAINER_NAME")" == "$current_container" ]]
+docker exec "$CODEX_CONTAINER_NAME" test -c /dev/mycodex-null
+printf 'PASS: real Compose reconciliation, device and cgroup rule passthrough, and omitted-option guards\n'
