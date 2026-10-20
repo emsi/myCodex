@@ -55,8 +55,12 @@ fi
 # a session option rather than interpolating notice text into a shell command.
 # A pager keeps long reports scrollable and waits for explicit dismissal.
 if [[ -n "${details}" || "${reopen}" == 1 ]]; then
+  # Let attach finish and send terminal queries before waiting for dismissal.
+  # A popup in the initial command sequence delays those queries past tmux's
+  # startup timeout, leaking device-attribute replies into the shell.
   exec tmux attach-session -t "${session}" \; \
-    display-popup -E -w 90% -h 80% -T 'myCodex notices (q to close)' \
-      "tmux show-options -qv -t '${session}' @mycodex-notices | LESS= less -+F -+X"
+    run-shell -b -C \
+      "display-popup -E -w 90% -h 80% -T 'myCodex notices (q to close)' \
+        \"tmux show-options -qv -t '${session}' @mycodex-notices | LESS= less -+F -+X\""
 fi
 exec tmux attach-session -t "${session}" \; display-message -d 8000 -l "${notice}"

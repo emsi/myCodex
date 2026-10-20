@@ -125,8 +125,13 @@ with tempfile.TemporaryDirectory(prefix="mycodex-tmux-test.") as directory:
         details = "Codex 0.160.0 is available\n" + "\n".join(
             f"Detail {i}: information that must remain readable" for i in range(40)
         ) + "\nEND_OF_REPORT $(touch /tmp/mycodex-notice-injection) #{pane_id}"
+        spectator = attach("none", "Another attached client", status=False)
         report = attach("none", "GUI access disabled (headless)", details=details)
         read_until(report, b"Codex 0.160.0 is available")
+        spectator_output = b""
+        while select.select([spectator], [], [], 0.1)[0]:
+            spectator_output += os.read(spectator, 65536)
+        assert b"Codex 0.160.0 is available" not in spectator_output
         os.write(report, b"G")
         read_until(report, b"END_OF_REPORT")
         assert tmux("show-options", "-qv", "-t", "review", "@mycodex-notices").startswith(
@@ -141,6 +146,48 @@ with tempfile.TemporaryDirectory(prefix="mycodex-tmux-test.") as directory:
         os.write(report, b"q")
         assert "ACTIVE_APPLICATION" in tmux("capture-pane", "-p", "-t", pane)
         print("PASS: tmux GUI badges, persistent scrollable reports, reattach, clients, and narrow terminals")
+
+        # Emulate a terminal answering primary device-attribute queries. Holding
+        # the popup beyond tmux's five-second startup timeout must not postpone
+        # those queries until dismissal and leak the reply into shell input.
+        tmux("detach-client", "-s", "=review")
+        prompt = "MYCODEX_TEST_PROMPT>"
+        tmux("respawn-pane", "-k", "-t", pane,
+             f"env PS1='{prompt} ' INPUTRC=/dev/null bash --noprofile --norc -i")
+        for reopen in (False, True):
+            report = attach("none", "GUI access disabled (headless)",
+                            details="TERMINAL_HANDSHAKE_NOTICE" if not reopen else "",
+                            reopen=reopen)
+            output = b""
+            replies = 0
+            first_reply_at = visible_at = closed_at = None
+            deadline = time.monotonic() + 12
+            while time.monotonic() < deadline:
+                if select.select([report], [], [], 0.05)[0]:
+                    output += os.read(report, 65536)
+                # Count in the accumulated stream so split escape sequences
+                # still receive exactly one immediate response each.
+                while replies < output.count(b"\x1b[c"):
+                    os.write(report, b"\x1b[?62;1;4c")
+                    replies += 1
+                    if first_reply_at is None:
+                        first_reply_at = time.monotonic()
+                now = time.monotonic()
+                if visible_at is None and b"TERMINAL_HANDSHAKE_NOTICE" in output:
+                    visible_at = now
+                if visible_at is not None and closed_at is None and now - visible_at >= 6:
+                    os.write(report, b"q")
+                    closed_at = now
+                if closed_at is not None and now - closed_at >= 1:
+                    break
+            assert closed_at is not None, f"Popup did not render: {output!r}"
+            contents = tmux("capture-pane", "-p", "-t", pane).rstrip()
+            assert contents == prompt, f"Popup leaked input into the shell: {contents!r}"
+            assert first_reply_at is not None and first_reply_at < closed_at, (
+                "Terminal identification waited for popup dismissal"
+            )
+            tmux("detach-client", "-s", "=review")
+        print("PASS: startup and reopened notices preserve terminal handshake and clean shell input")
     finally:
         subprocess.run([TMUX, "-S", socket, "kill-server"], env=env, capture_output=True)
         for pid, fd in children:
