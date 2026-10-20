@@ -30,12 +30,6 @@ gpu_vendor_for_node() {
   done
   return 1
 }
-gpu_nvidia_drm_nodes() {
-  local node
-  for node in ${TEST_GPU_NODES:-}; do
-    if [[ "${node#*:}" == nvidia ]]; then printf '%s\n' "${node%%:*}"; fi
-  done
-}
 gpu_device_exists() {
   case "$1" in
     /dev/kfd) [[ "${TEST_GPU_KFD:-0}" == 1 ]] ;;
@@ -287,16 +281,17 @@ class GpuLauncherTest(unittest.TestCase):
                                       '/dev/dri/renderD130:nvidia /dev/dri/card0:nvidia',
                         TEST_GPU_KFD='1', TEST_GPU_NVIDIA='1', MYCODEX_AUTO_PULL='1')
         cases = {
-            'amd': ['/dev/zero:/dev/dri/renderD128:rw', '/dev/dri/renderD128',
-                    '/dev/dri/renderD128:rw', '/dev/dri', '/dev/zero:/dev',
-                    '/dev/zero:/', '/dev/zero:/dev//dri/./renderD128/',
+            'amd': ['/dev/dri/renderD129:/dev/dri/renderD128:rw',
+                    '/dev/zero:/dev/dri/renderD128:rw', '/dev/dri/renderD128',
+                    '/dev/dri/renderD128:/dev/dri/renderD128:r',
+                    '/dev/dri/renderD128:/dev/dri/renderD128:w',
+                    '/dev/dri/renderD128:/dev/dri/renderD128:rwm',
+                    '/dev/zero:/dev//dri/./renderD128/',
                     '/dev/zero:/dev/dri/../kfd', '/dev/kfd',
-                    '/dev/zero:/dev/dri/renderD128/child'],
-            'intel': ['/dev/zero:/dev/dri/renderD129:r', '/dev/dri/'],
-            'nvidia': ['/dev/zero:/dev/nvidia0', '/dev/nvidia17', '/dev/nvidiactl',
-                       '/dev/nvidia-uvm', '/dev/nvidia-uvm-tools', '/dev/nvidia-modeset',
-                       '/dev/nvidia-caps', '/dev/zero:/dev/nvidia-caps/nvidia-cap1',
-                       '/dev/zero:/dev', '/dev/dri', '/dev/dri/renderD130', '/dev/dri/card0'],
+                    '/dev/kfd:/dev/kfd:r'],
+            'intel': ['/dev/zero:/dev/dri/renderD129:rw', '/dev/dri/renderD129',
+                      '/dev/dri/renderD129:/dev/dri/renderD129:r'],
+            'auto': ['/dev/zero:/dev/dri/renderD128:rw', '/dev/zero:/dev/dri/renderD129:rw'],
         }
         for mode, specs in cases.items():
             for spec in specs:
@@ -308,6 +303,34 @@ class GpuLauncherTest(unittest.TestCase):
                     self.assertFalse(self.state()['exists'])
         self.assertTrue(all(command == 'ps' for command in self.commands()), self.commands())
         self.assertFalse(self.override.exists())
+
+    def test_identical_manual_gpu_mappings_are_allowed(self):
+        self.env.update(TEST_GPU_NODES='/dev/dri/renderD128:amd /dev/dri/renderD129:intel',
+                        TEST_GPU_KFD='1')
+        alias = self.path / 'gpu-alias'
+        alias.symlink_to('/dev/dri/renderD128')
+        for mode, spec in [
+            ('amd', '/dev/dri/renderD128:/dev/dri/renderD128:rw'),
+            ('amd', '/dev/kfd:/dev/kfd:wr'),
+            ('amd', f'{alias}:/dev/dri/renderD128:rw'),
+            ('amd', '/dev/dri/./renderD128:/dev//dri/renderD128:rw'),
+            ('intel', '/dev/dri/renderD129:/dev/dri/renderD129:rw'),
+        ]:
+            with self.subTest(mode=mode, spec=spec):
+                self.set_state(exists=False, running=False)
+                self.launch(f'--gpu={mode}', '--device', spec)
+                self.assertEqual(self.state()['gpu'], mode)
+                self.assertEqual(self.commands()[-1], 'exec')
+
+    def test_existing_gpu_accepts_identical_mapping_on_reconciliation(self):
+        self.amd()
+        for running in (False, True):
+            with self.subTest(running=running):
+                self.set_state(exists=True, running=running, gpu='amd',
+                               devices='/dev/dri/renderD128,/dev/kfd')
+                self.launch('--device', '/dev/dri/renderD128:/dev/dri/renderD128:rw')
+                self.assertEqual(self.state()['devices'], '/dev/dri/renderD128,/dev/kfd')
+                self.assertEqual(self.commands()[-1], 'exec')
 
     def test_existing_gpu_rejects_conflicts_before_reconciliation(self):
         self.amd()
@@ -347,16 +370,30 @@ class GpuLauncherTest(unittest.TestCase):
                 self.assertEqual(self.state()['gpu'], 'amd,intel,nvidia' if mode == 'auto' else mode)
                 self.assertEqual(self.commands()[-1], 'exec')
 
-    def test_cdi_selectors_cannot_bypass_managed_gpu_checks(self):
+    def test_directories_and_nvidia_names_are_not_reserved(self):
+        self.env.update(TEST_GPU_NODES='/dev/dri/renderD128:amd /dev/dri/renderD130:nvidia',
+                        TEST_GPU_NVIDIA='1')
+        for mode in ('amd', 'nvidia', 'auto'):
+            with self.subTest(mode=mode):
+                self.set_state(exists=False, running=False)
+                self.launch(f'--gpu={mode}', '--device', '/dev/dri',
+                            '--device', '/dev/nvidiactl:/dev/nvidiactl:rw',
+                            '--device', '/dev/nvidia-caps',
+                            '--device', '/dev/zero:/dev/nvidia999:rw',
+                            '--device', '/dev/dri/renderD130:/dev/dri/renderD130:rw')
+                self.assertEqual(self.state()['gpu'], 'amd,nvidia' if mode == 'auto' else mode)
+                self.assertEqual(self.commands()[-1], 'exec')
+
+    def test_cdi_selectors_remain_supported_with_managed_gpus(self):
         self.amd()
         self.env['TEST_GPU_NVIDIA'] = '1'
         for mode in ('amd', 'nvidia'):
             for selector in ('nvidia.com/gpu=all', 'example.com/device=custom'):
                 with self.subTest(mode=mode, selector=selector):
-                    output = self.launch(f'--gpu={mode}', '--device', selector, success=False)
-                    self.assertIn('cannot be checked for conflicts with managed GPU', output)
-                    self.assertFalse(self.state()['exists'])
-        self.assertTrue(all(command == 'ps' for command in self.commands()), self.commands())
+                    self.set_state(exists=False, running=False)
+                    self.launch(f'--gpu={mode}', '--device', selector)
+                    self.assertEqual(self.state()['gpu'], mode)
+                    self.assertEqual(self.commands()[-1], 'exec')
 
     def test_fully_manual_devices_remain_supported(self):
         # Manual configurations need neither GPU discovery nor a local daemon.
@@ -520,8 +557,11 @@ class GpuLauncherTest(unittest.TestCase):
                         TEST_GPU_NODES='/dev/dri/renderD128:amd /dev/dri/renderD129:intel',
                         TEST_GPU_KFD='1', TEST_GPU_NVIDIA='1')
         self.launch('--gpu', '--device', '/dev/zero:/dev/review-zero:r',
+                    '--device', '/dev/dri/renderD128:/dev/dri/renderD128:rw',
+                    '--device', '/dev/kfd:/dev/kfd:rw',
                     '--device-cgroup-rule', 'c 1:5 r', 'config', '--format', 'json')
         config = json.loads(self.last_result.stdout)['services']['codex']
+        self.assertEqual(len(config['devices']), 4)
         devices = {item['target']: (item['source'], item['permissions']) for item in config['devices']}
         self.assertEqual(devices, {
             '/dev/dri/renderD128': ('/dev/dri/renderD128', 'rw'),
@@ -534,6 +574,25 @@ class GpuLauncherTest(unittest.TestCase):
         self.assertEqual(config['deploy']['resources']['reservations']['devices'][0]['driver'], 'nvidia')
         self.assertIn('24680:gpu-24680', config['environment']['MYCODEX_HOST_GROUPS'])
         self.assertIn('24681:gpu-24681', config['environment']['MYCODEX_HOST_GROUPS'])
+
+    @unittest.skipUnless(os.environ.get('MYCODEX_TEST_COMPOSE'), 'set MYCODEX_TEST_COMPOSE for real Compose schema validation')
+    def test_real_compose_preserves_runtime_defined_manual_devices(self):
+        self.amd()
+        self.env.update(TEST_REAL_COMPOSE=os.environ['MYCODEX_TEST_COMPOSE'], TEST_GPU_NVIDIA='1')
+        self.launch('--gpu', '--device', '/dev/dri',
+                    '--device', '/dev/nvidiactl:/dev/nvidiactl:rw',
+                    '--device', '/dev/zero:/dev/nvidia999:rw',
+                    '--device', 'example.com/device=custom', 'config', '--format', 'json')
+        config = json.loads(self.last_result.stdout)['services']['codex']
+        devices = {item['target']: (item['source'], item['permissions']) for item in config['devices']}
+        self.assertEqual(devices, {
+            '/dev/dri/renderD128': ('/dev/dri/renderD128', 'rw'),
+            '/dev/kfd': ('/dev/kfd', 'rw'),
+            '/dev/dri': ('/dev/dri', 'rwm'),
+            '/dev/nvidiactl': ('/dev/nvidiactl', 'rw'),
+            '/dev/nvidia999': ('/dev/zero', 'rw'),
+            'example.com/device=custom': ('example.com/device=custom', 'rwm'),
+        })
 
     @unittest.skipUnless(os.environ.get('MYCODEX_TEST_COMPOSE'), 'set MYCODEX_TEST_COMPOSE for real Compose schema validation')
     def test_real_compose_schema_and_recreated_configuration_hash(self):
