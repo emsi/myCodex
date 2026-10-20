@@ -366,6 +366,18 @@ including CDI selectors supported by your runtime. Paths refer to the Docker
 daemon's host. `myCodex --device /dev/dri config` previews the configuration,
 and `info` lists the requested devices.
 
+With managed GPU access enabled, `--device` destinations must not overlap its
+device paths. This includes parent directories such as `/dev/dri`, mappings
+that change permissions on the same device, and NVIDIA runtime device paths.
+Conflicts are rejected before container creation or recreation, including when
+the GPU selection is restored from an existing container. Unrelated devices
+such as `/dev/ttyUSB0` can still be combined with `--gpu`.
+
+CDI selectors can expand into arbitrary device paths that the launcher cannot
+check. Use them with a fully manual device configuration, without managed GPU
+access. They remain supported when managed GPU access is off. These checks apply
+to `--device`; custom `-f` Compose files remain advanced configuration overrides.
+
 Add device cgroup rules, quoting each rule to preserve its spaces:
 
 ```bash

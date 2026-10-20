@@ -51,6 +51,15 @@ gpu_vendor_for_node() {
   esac
 }
 
+gpu_nvidia_drm_nodes() {
+  local node
+  for node in /dev/dri/card[0-9]* /dev/dri/renderD[0-9]*; do
+    if gpu_device_exists "${node}" && [[ "$(gpu_vendor_for_node "${node}")" == nvidia ]]; then
+      printf '%s\n' "${node}"
+    fi
+  done
+}
+
 # World-readable/writable nodes need no supplementary group. Otherwise use
 # numeric device ownership, not distribution-specific render/video group IDs.
 gpu_device_group() {
@@ -205,6 +214,44 @@ restore_gpu() {
   GPU_REASON="preserving established GPU access"
 }
 
+guard_gpu_device_mappings() {
+  [[ "${GPU_MODE}" != none && ${#EXTRA_DEVICE_SPECS[@]} -gt 0 ]] || return 0
+  local spec source target permissions extra node
+  local -a managed=("${GPU_DEVICES[@]}")
+
+  # NVIDIA's runtime injects these devices, so they are not in GPU_DEVICES.
+  # Protect the paths even before the runtime creates optional device nodes.
+  if [[ ",${GPU_MODE}," == *',nvidia,'* ]]; then
+    managed+=(/dev/nvidiactl /dev/nvidia-uvm /dev/nvidia-uvm-tools
+              /dev/nvidia-modeset /dev/nvidia-caps)
+    while IFS= read -r node; do managed+=("${node}"); done < <(gpu_nvidia_drm_nodes)
+  fi
+
+  for spec in "${EXTRA_DEVICE_SPECS[@]}"; do
+    # CDI selectors expand into runtime-defined device paths. The launcher
+    # cannot establish that those paths are disjoint from managed GPUs.
+    if [[ "${spec}" != /* && "${spec}" == *=* ]]; then
+      die "--device CDI selector '${spec}' cannot be checked for conflicts with managed GPU access; use managed GPUs or a fully manual device configuration"
+    fi
+    IFS=: read -r source target permissions extra <<<"${spec}"
+    target="${target:-${source}}"
+    # Docker also accepts HOST_PATH:PERMISSIONS shorthand.
+    if [[ "${target}" =~ ^[rwm]+$ && -z "${permissions}${extra}" ]]; then target="${source}"; fi
+    [[ "${target}" == /* ]] || continue # Leave invalid syntax to Compose.
+    # Container destinations must not resolve symlinks on the host.
+    target="$(realpath -ms -- "${target}")" || die "cannot normalize device target: ${target}"
+    if [[ ",${GPU_MODE}," == *',nvidia,'* && "${target}" =~ ^/dev/nvidia[0-9]+(/|$) ]]; then
+      die "--device '${spec}' conflicts with managed GPU target ${target}; remove this manual mapping"
+    fi
+    for node in "${managed[@]}"; do
+      if [[ "${target}" == / || "${target}" == "${node}" \
+        || "${node}" == "${target}/"* || "${target}" == "${node}/"* ]]; then
+        die "--device '${spec}' conflicts with managed GPU target ${node}; remove this manual mapping"
+      fi
+    done
+  done
+}
+
 write_gpu_override() {
   local node gid devices
   local -a permission_nodes
@@ -256,6 +303,7 @@ prepare_gpu() {
   else
     detect_gpu || die "--gpu unavailable: ${GPU_REASON}"
   fi
+  guard_gpu_device_mappings
   write_gpu_override || die "cannot prepare GPU access: ${GPU_REASON}"
   if [[ "${GPU_MODE}" != none ]]; then startup_notice "GPU ${GPU_MODE}: ${GPU_REASON}"; fi
 }

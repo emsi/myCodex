@@ -30,6 +30,12 @@ gpu_vendor_for_node() {
   done
   return 1
 }
+gpu_nvidia_drm_nodes() {
+  local node
+  for node in ${TEST_GPU_NODES:-}; do
+    if [[ "${node#*:}" == nvidia ]]; then printf '%s\n' "${node%%:*}"; fi
+  done
+}
 gpu_device_exists() {
   case "$1" in
     /dev/kfd) [[ "${TEST_GPU_KFD:-0}" == 1 ]] ;;
@@ -276,6 +282,93 @@ class GpuLauncherTest(unittest.TestCase):
         self.assertEqual(self.state()['gpu'], 'amd')
         self.assertEqual(self.commands()[-1], 'exec')
 
+    def test_conflicting_device_targets_fail_before_creation(self):
+        self.env.update(TEST_GPU_NODES='/dev/dri/renderD128:amd /dev/dri/renderD129:intel '
+                                      '/dev/dri/renderD130:nvidia /dev/dri/card0:nvidia',
+                        TEST_GPU_KFD='1', TEST_GPU_NVIDIA='1', MYCODEX_AUTO_PULL='1')
+        cases = {
+            'amd': ['/dev/zero:/dev/dri/renderD128:rw', '/dev/dri/renderD128',
+                    '/dev/dri/renderD128:rw', '/dev/dri', '/dev/zero:/dev',
+                    '/dev/zero:/', '/dev/zero:/dev//dri/./renderD128/',
+                    '/dev/zero:/dev/dri/../kfd', '/dev/kfd',
+                    '/dev/zero:/dev/dri/renderD128/child'],
+            'intel': ['/dev/zero:/dev/dri/renderD129:r', '/dev/dri/'],
+            'nvidia': ['/dev/zero:/dev/nvidia0', '/dev/nvidia17', '/dev/nvidiactl',
+                       '/dev/nvidia-uvm', '/dev/nvidia-uvm-tools', '/dev/nvidia-modeset',
+                       '/dev/nvidia-caps', '/dev/zero:/dev/nvidia-caps/nvidia-cap1',
+                       '/dev/zero:/dev', '/dev/dri', '/dev/dri/renderD130', '/dev/dri/card0'],
+        }
+        for mode, specs in cases.items():
+            for spec in specs:
+                with self.subTest(mode=mode, spec=spec):
+                    output = self.launch(f'--gpu={mode}', '--device', spec, success=False)
+                    self.assertIn('conflicts with managed GPU target', output)
+                    self.assertIn(spec, output)
+                    self.assertEqual(self.last_result.returncode, 2)
+                    self.assertFalse(self.state()['exists'])
+        self.assertTrue(all(command == 'ps' for command in self.commands()), self.commands())
+        self.assertFalse(self.override.exists())
+
+    def test_existing_gpu_rejects_conflicts_before_reconciliation(self):
+        self.amd()
+        self.env['MYCODEX_AUTO_PULL'] = '1'
+        for running in (False, True):
+            for command in [(), ('up', '-d'), ('create',), ('run', '--rm', 'codex', 'true'),
+                            ('--gpu=amd', 'config')]:
+                with self.subTest(running=running, command=command):
+                    self.set_state(exists=True, running=running, gpu='amd',
+                                   devices='/dev/dri/renderD128,/dev/kfd')
+                    original = self.state()
+                    output = self.launch('--device=/dev/zero:/dev/dri/renderD128:rw',
+                                         *command, success=False)
+                    self.assertIn('conflicts with managed GPU target', output)
+                    self.assertEqual(self.state(), original)
+        self.assertTrue(all(command == 'ps' for command in self.commands()), self.commands())
+
+    def test_conflict_check_uses_saved_gpu_selection(self):
+        self.env['TEST_GPU_NODES'] = '/dev/dri/renderD128:amd /dev/dri/renderD129:amd'
+        self.set_state(exists=True, running=True, gpu='amd', devices='/dev/dri/renderD128')
+        # A newly available GPU is not part of the existing managed selection.
+        self.launch('--device', '/dev/zero:/dev/dri/renderD129:rw')
+        self.assertEqual(self.state()['devices'], '/dev/dri/renderD128')
+        self.assertEqual(self.commands()[-1], 'exec')
+
+    def test_unrelated_manual_devices_work_with_managed_gpus(self):
+        self.env.update(TEST_GPU_NODES='/dev/dri/renderD128:amd /dev/dri/renderD129:intel',
+                        TEST_GPU_KFD='1', TEST_GPU_NVIDIA='1')
+        for mode in ('amd', 'intel', 'nvidia', 'auto'):
+            with self.subTest(mode=mode):
+                self.set_state(exists=False, running=False)
+                self.launch(f'--gpu={mode}', '--device', '/dev/zero:/dev/review-zero:r',
+                            '--device', '/dev/zero:/dev/dri/renderD128-extra:rw',
+                            '--device', '/dev/zero:/dev/nvidia-other:rw',
+                            '--device', '/dev/zero:/dev/nvidia0-other:rw',
+                            '--device-cgroup-rule', 'c 1:5 r')
+                self.assertEqual(self.state()['gpu'], 'amd,intel,nvidia' if mode == 'auto' else mode)
+                self.assertEqual(self.commands()[-1], 'exec')
+
+    def test_cdi_selectors_cannot_bypass_managed_gpu_checks(self):
+        self.amd()
+        self.env['TEST_GPU_NVIDIA'] = '1'
+        for mode in ('amd', 'nvidia'):
+            for selector in ('nvidia.com/gpu=all', 'example.com/device=custom'):
+                with self.subTest(mode=mode, selector=selector):
+                    output = self.launch(f'--gpu={mode}', '--device', selector, success=False)
+                    self.assertIn('cannot be checked for conflicts with managed GPU', output)
+                    self.assertFalse(self.state()['exists'])
+        self.assertTrue(all(command == 'ps' for command in self.commands()), self.commands())
+
+    def test_fully_manual_devices_remain_supported(self):
+        # Manual configurations need neither GPU discovery nor a local daemon.
+        self.env['TEST_ENDPOINT'] = 'ssh://server'
+        for spec in ('/dev/dri', 'nvidia.com/gpu=all', 'example.com/device=custom'):
+            with self.subTest(spec=spec):
+                self.set_state(exists=False, running=False)
+                self.launch('--no-gpu', '--device', spec)
+                self.assertEqual(self.state()['gpu'], 'none')
+                self.assertEqual(self.commands()[-1], 'exec')
+        self.assertFalse(any(call.get('docker', [''])[0] in ('context', 'info') for call in self.calls()))
+
     def test_explicit_vendor_list_is_normalized(self):
         self.env.update(TEST_GPU_NODES='/dev/dri/renderD128:amd /dev/dri/renderD129:intel')
         self.launch('--gpu=intel,amd')
@@ -420,6 +513,27 @@ class GpuLauncherTest(unittest.TestCase):
         self.assertIn('/dev/dri/renderD128', output)
         self.assertFalse(self.state()['exists'])
         self.assertFalse(any(call.get('docker', [])[:2] == ['volume', 'create'] for call in self.calls()))
+
+    @unittest.skipUnless(os.environ.get('MYCODEX_TEST_COMPOSE'), 'set MYCODEX_TEST_COMPOSE for real Compose schema validation')
+    def test_real_compose_keeps_nonconflicting_manual_devices(self):
+        self.env.update(TEST_REAL_COMPOSE=os.environ['MYCODEX_TEST_COMPOSE'],
+                        TEST_GPU_NODES='/dev/dri/renderD128:amd /dev/dri/renderD129:intel',
+                        TEST_GPU_KFD='1', TEST_GPU_NVIDIA='1')
+        self.launch('--gpu', '--device', '/dev/zero:/dev/review-zero:r',
+                    '--device-cgroup-rule', 'c 1:5 r', 'config', '--format', 'json')
+        config = json.loads(self.last_result.stdout)['services']['codex']
+        devices = {item['target']: (item['source'], item['permissions']) for item in config['devices']}
+        self.assertEqual(devices, {
+            '/dev/dri/renderD128': ('/dev/dri/renderD128', 'rw'),
+            '/dev/dri/renderD129': ('/dev/dri/renderD129', 'rw'),
+            '/dev/kfd': ('/dev/kfd', 'rw'),
+            '/dev/review-zero': ('/dev/zero', 'r'),
+        })
+        self.assertEqual(config['device_cgroup_rules'], ['c 1:5 r'])
+        self.assertEqual(config['labels']['io.infrasecture.mycodex.gpu'], 'amd,intel,nvidia')
+        self.assertEqual(config['deploy']['resources']['reservations']['devices'][0]['driver'], 'nvidia')
+        self.assertIn('24680:gpu-24680', config['environment']['MYCODEX_HOST_GROUPS'])
+        self.assertIn('24681:gpu-24681', config['environment']['MYCODEX_HOST_GROUPS'])
 
     @unittest.skipUnless(os.environ.get('MYCODEX_TEST_COMPOSE'), 'set MYCODEX_TEST_COMPOSE for real Compose schema validation')
     def test_real_compose_schema_and_recreated_configuration_hash(self):
