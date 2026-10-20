@@ -116,6 +116,7 @@ case " $* " in
     [[ "${FAKE_HASH_FAILURE:-0}" != 1 ]] || exit 1
     printf 'codex %s\n' "${FAKE_DESIRED_HASH:-${FAKE_HASH}}"
     ;;
+  *' config ') ;;
   *)
     printf 'unexpected fake compose invocation: %s\n' "$*" >&2
     exit 1
@@ -256,6 +257,22 @@ FAKE_RUNNING=1 MYCODEX_UPDATE_CHECK=0 run_launcher --private-env >"${running_rec
 assert_contains "${FAKE_COMPOSE_LOG}" "up -d --no-build --pull never codex"
 assert_not_contains "${FAKE_COMPOSE_LOG}" " pull "
 assert_not_contains "${FAKE_DOCKER_LOG}" "image inspect"
+
+for option in --device --device-cgroup-rule; do
+  value=/dev/dri
+  if [[ "${option}" == --device-cgroup-rule ]]; then
+    value='c 234:* rwm'
+  fi
+  for running in 0 1; do
+    reset_state
+    touch "${FAKE_IMAGE_STATE}"
+    FAKE_RUNNING="${running}" MYCODEX_UPDATE_CHECK=0 MYCODEX_AUTO_PULL=0 \
+      run_launcher "${option}" "${value}" >"${tmp_dir}/${option}-${running}.out" 2>&1
+    assert_contains "${FAKE_COMPOSE_LOG}" "compose config"
+    assert_contains "${FAKE_COMPOSE_LOG}" "up -d --no-build --pull never codex"
+    assert_contains "${FAKE_COMPOSE_LOG}" "exec -it codex"
+  done
+done
 
 reset_state
 pull_output="${tmp_dir}/pull.out"
