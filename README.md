@@ -350,6 +350,38 @@ myCodex --volume ./data:/mnt/data:ro
 myCodex --private-env -v ./tools:/mnt/tools:ro
 ```
 
+Pass host devices to the container:
+
+```bash
+myCodex --device /dev/dri
+myCodex --device=/dev/ttyUSB0:/dev/ttyUSB0:rw
+myCodex --device /dev/video0 --device /dev/snd up -d
+```
+
+Use `--device HOST_PATH[:CONTAINER_PATH[:PERMISSIONS]]` before the subcommand,
+and repeat it for multiple devices. An omitted container path uses the host
+path; permissions default to `rwm` (read, write, and mknod). Device specs are
+passed through to [Compose's `devices` setting](https://docs.docker.com/reference/compose-file/services/#devices),
+including CDI selectors supported by your runtime. Paths refer to the Docker
+daemon's host. `myCodex --device /dev/dri config` previews the configuration,
+and `info` lists the requested devices.
+
+Add device cgroup rules, quoting each rule to preserve its spaces:
+
+```bash
+myCodex --device-cgroup-rule='c 234:* rwm'
+myCodex --device-cgroup-rule 'c 234:* rwm' --device-cgroup-rule 'b 8:* rw' up -d
+myCodex --device /dev/ttyUSB0 --device-cgroup-rule 'c 188:* rwm'
+```
+
+Both `--device-cgroup-rule RULE` and `--device-cgroup-rule=RULE` are repeatable.
+Rules are passed to [Compose's `device_cgroup_rules` setting](https://docs.docker.com/reference/compose-file/services/#device_cgroup_rules)
+and appear in `config` and `info`.
+
+Like `-v`, `--device` and `--device-cgroup-rule` request reconciliation on
+ordinary startup and may recreate an existing container. Repeat these options
+when reconciling with `up`, or keep them in a Compose override file.
+
 Apply an additional Compose file after the built-in myCodex Compose file:
 
 ```bash
@@ -395,8 +427,9 @@ project name, Compose file, workspace mount, and container environment.
 
 `bin/myCodex` is the supported entry point and Compose wrapper. It derives a
 project name from the current directory, assembles the host identity and path
-configuration, applies optional volume and Compose overrides, starts the
-workstation when necessary, waits for its tmux session, and attaches.
+configuration, applies optional volume, device, device cgroup rule, and Compose
+overrides, starts the workstation when necessary, waits for its tmux session,
+and attaches.
 
 ### Identity And Paths
 
@@ -469,9 +502,10 @@ A stopped container using `latest` is replaced when the image ID changed and
 Compose's service configuration hash matches its original configuration. This
 preserves its home/workspace volumes and GUI mode; files stored only in the
 container's writable layer are replaced along with the image. A changed or
-unverifiable configuration (for example omitted `-v` or `-f` options) keeps the
-original container and reports how to apply the update explicitly. `myCodex
-start` always starts the original container without refreshing or replacing it.
+unverifiable configuration (for example omitted `-v`, `--device`,
+`--device-cgroup-rule`, or `-f` options) keeps the original container and reports
+how to apply the update explicitly. `myCodex start` always starts the original
+container without refreshing or replacing it.
 A running container is never pulled or replaced merely because `latest` moved.
 Persistent environment settings (such as a custom state volume or session name)
 do not request recreation on each attach; use `up` to apply changed defaults.

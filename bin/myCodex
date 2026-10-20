@@ -148,6 +148,8 @@ Options:
   --gpu[=auto|nvidia|amd|intel]       Enable GPUs on creation, then attach (vendors can be comma-separated)
   --no-gpu                           Disable GPU access on creation
   -v, --volume <spec>                Add an extra Docker-style volume mount
+  --device <spec>                    Pass a device to the container (repeatable)
+  --device-cgroup-rule <rule>        Add a device cgroup rule (repeatable)
   -f, --compose-file <path>          Add an extra Compose override file
 EOF
 }
@@ -256,10 +258,12 @@ is_managed_mount_target() {
 }
 
 EXTRA_VOLUME_SPECS=()
+EXTRA_DEVICE_SPECS=()
+EXTRA_DEVICE_CGROUP_RULES=()
 ADDITIONAL_COMPOSE_FILES=()
 PRIVATE_ENV=0
 RECONCILE_REQUIRED=0
-EXTRA_VOLUME_OVERRIDE_FILE=""
+EXTRA_RUNTIME_OVERRIDE_FILE=""
 GUI_OPTION_SPECIFIED=0
 GUI_REQUEST=""
 GUI_MODE=""
@@ -274,8 +278,8 @@ GUI_X11_CREDENTIALS=""
 HOST_GROUPS="$(host_group_specs)"
 
 cleanup() {
-  if [[ -n "${EXTRA_VOLUME_OVERRIDE_FILE}" ]]; then
-    rm -f -- "${EXTRA_VOLUME_OVERRIDE_FILE}"
+  if [[ -n "${EXTRA_RUNTIME_OVERRIDE_FILE}" ]]; then
+    rm -f -- "${EXTRA_RUNTIME_OVERRIDE_FILE}"
   fi
   if [[ -n "${GUI_TEMP_FILE}" ]]; then
     rm -f -- "${GUI_TEMP_FILE}"
@@ -334,6 +338,41 @@ add_extra_volume() {
   RECONCILE_REQUIRED=1
 }
 
+add_extra_device() {
+  local spec="$1"
+
+  case "${spec}" in
+    ''|-*)
+      die "--device requires a device spec"
+      ;;
+    *$'\n'*|*$'\r'*)
+      die "device spec must not contain newlines"
+      ;;
+  esac
+
+  # Let Compose and the runtime validate device mappings and CDI selectors.
+  # Device paths belong to the daemon host, which may be remote.
+  EXTRA_DEVICE_SPECS+=("${spec}")
+  RECONCILE_REQUIRED=1
+}
+
+add_device_cgroup_rule() {
+  local rule="$1"
+
+  case "${rule}" in
+    ''|-*)
+      die "--device-cgroup-rule requires a rule"
+      ;;
+    *$'\n'*|*$'\r'*)
+      die "device cgroup rule must not contain newlines"
+      ;;
+  esac
+
+  # Preserve the rule as one value; Compose and the runtime validate its syntax.
+  EXTRA_DEVICE_CGROUP_RULES+=("${rule}")
+  RECONCILE_REQUIRED=1
+}
+
 add_compose_file() {
   local file
 
@@ -389,6 +428,28 @@ while [[ $# -gt 0 ]]; do
       add_extra_volume "${1#--volume=}"
       shift
       ;;
+    --device)
+      if [[ $# -lt 2 ]]; then
+        die "$1 requires a device spec"
+      fi
+      add_extra_device "$2"
+      shift 2
+      ;;
+    --device=*)
+      add_extra_device "${1#--device=}"
+      shift
+      ;;
+    --device-cgroup-rule)
+      if [[ $# -lt 2 ]]; then
+        die "$1 requires a rule"
+      fi
+      add_device_cgroup_rule "$2"
+      shift 2
+      ;;
+    --device-cgroup-rule=*)
+      add_device_cgroup_rule "${1#--device-cgroup-rule=}"
+      shift
+      ;;
     -f|--compose-file)
       if [[ $# -lt 2 ]]; then
         die "$1 requires a compose file path"
@@ -442,23 +503,44 @@ ensure_state_volume() {
   fi
 }
 
-ensure_extra_volumes_override() {
-  if [[ ${#EXTRA_VOLUME_SPECS[@]} -eq 0 || -n "${EXTRA_VOLUME_OVERRIDE_FILE}" ]]; then
+ensure_extra_runtime_override() {
+  if [[ -n "${EXTRA_RUNTIME_OVERRIDE_FILE}" ]] \
+    || [[ ${#EXTRA_VOLUME_SPECS[@]} -eq 0 && ${#EXTRA_DEVICE_SPECS[@]} -eq 0 \
+      && ${#EXTRA_DEVICE_CGROUP_RULES[@]} -eq 0 ]]; then
     return
   fi
 
-  EXTRA_VOLUME_OVERRIDE_FILE="$(mktemp -t mycodex-volumes.XXXXXX.yaml)"
+  EXTRA_RUNTIME_OVERRIDE_FILE="$(mktemp -t mycodex-runtime.XXXXXX.yaml)"
   {
     printf 'services:\n'
     printf '  codex:\n'
-    printf '    volumes:\n'
-    local volume
-    for volume in "${EXTRA_VOLUME_SPECS[@]}"; do
-      printf '      - '
-      yaml_quote "${volume}"
-      printf '\n'
-    done
-  } >"${EXTRA_VOLUME_OVERRIDE_FILE}"
+    local volume device rule
+    if [[ ${#EXTRA_VOLUME_SPECS[@]} -gt 0 ]]; then
+      printf '    volumes:\n'
+      for volume in "${EXTRA_VOLUME_SPECS[@]}"; do
+        printf '      - '
+        yaml_quote "${volume}"
+        printf '\n'
+      done
+    fi
+    if [[ ${#EXTRA_DEVICE_SPECS[@]} -gt 0 ]]; then
+      printf '    devices:\n'
+      for device in "${EXTRA_DEVICE_SPECS[@]}"; do
+        printf '      - '
+        # Escape Compose interpolation as well as YAML quoting.
+        yaml_quote "${device//\$/\$\$}"
+        printf '\n'
+      done
+    fi
+    if [[ ${#EXTRA_DEVICE_CGROUP_RULES[@]} -gt 0 ]]; then
+      printf '    device_cgroup_rules:\n'
+      for rule in "${EXTRA_DEVICE_CGROUP_RULES[@]}"; do
+        printf '      - '
+        yaml_quote "${rule//\$/\$\$}"
+        printf '\n'
+      done
+    fi
+  } >"${EXTRA_RUNTIME_OVERRIDE_FILE}"
 }
 
 x11_socket_for_display() {
@@ -780,8 +862,8 @@ compose_args() {
   for file in "${ADDITIONAL_COMPOSE_FILES[@]}"; do
     printf '%s\n' -f "${file}"
   done
-  if [[ -n "${EXTRA_VOLUME_OVERRIDE_FILE}" ]]; then
-    printf '%s\n' -f "${EXTRA_VOLUME_OVERRIDE_FILE}"
+  if [[ -n "${EXTRA_RUNTIME_OVERRIDE_FILE}" ]]; then
+    printf '%s\n' -f "${EXTRA_RUNTIME_OVERRIDE_FILE}"
   fi
 }
 
@@ -824,25 +906,25 @@ run_docker_compose() {
 
 compose_run() {
   ensure_state_volume
-  ensure_extra_volumes_override
+  ensure_extra_runtime_override
   run_docker_compose "$@"
 }
 
 compose() {
   ensure_state_volume
-  ensure_extra_volumes_override
+  ensure_extra_runtime_override
   run_docker_compose "$@"
 }
 
 compose_without_state_volume_creation() {
-  ensure_extra_volumes_override
+  ensure_extra_runtime_override
   run_docker_compose "$@"
 }
 
 is_running() {
   local services
   ensure_state_volume
-  ensure_extra_volumes_override
+  ensure_extra_runtime_override
   services="$(run_docker_compose ps --status running --services)" \
     || die "cannot determine whether the project is running; no container was changed"
   grep -Fxq "${SERVICE}" <<<"${services}"
@@ -1209,7 +1291,8 @@ wait_for_container_ready() {
 }
 
 start_stack() {
-  if [[ ${#EXTRA_VOLUME_SPECS[@]} -gt 0 ]]; then
+  if [[ ${#EXTRA_VOLUME_SPECS[@]} -gt 0 || ${#EXTRA_DEVICE_SPECS[@]} -gt 0 \
+    || ${#EXTRA_DEVICE_CGROUP_RULES[@]} -gt 0 ]]; then
     compose_run config >/dev/null
   fi
 
@@ -1418,6 +1501,13 @@ print_info() {
   fi
   printf '  orchestrator      %s\n' "${MYCODEX_COMPOSE:-docker compose}"
   printf '  compose file      %s\n' "${COMPOSE_FILE}"
+  local device rule
+  for device in "${EXTRA_DEVICE_SPECS[@]}"; do
+    printf '  device            %s\n' "${device}"
+  done
+  for rule in "${EXTRA_DEVICE_CGROUP_RULES[@]}"; do
+    printf '  device cgroup     %s\n' "${rule}"
+  done
   local f
   if [[ ${#ADDITIONAL_COMPOSE_FILES[@]} -gt 0 ]]; then
     for f in "${ADDITIONAL_COMPOSE_FILES[@]}"; do
