@@ -376,7 +376,7 @@ class ReleaseTest(unittest.TestCase):
         time.sleep(0.1)
         self.assertEqual(len((self.transport / "requests").read_text().splitlines()), count)
 
-    def test_publication_without_runtime_image_signs_and_verifies_before_publish(self):
+    def test_publication_without_developer_tests_signs_and_verifies_before_publish(self):
         # Real SSH tag signing and Git push to a private local bare repository;
         # only the GitHub transport and remote destination are substituted.
         loader = importlib.machinery.SourceFileLoader('publisher', str(ROOT / 'bin/release-myCodex'))
@@ -395,10 +395,8 @@ class ReleaseTest(unittest.TestCase):
         real_build = publisher.builder.build
 
         def local_run(*args, **kwargs):
-            if args[:2] == (sys.executable, str(checkout / 'bin/check-launcher-release')):
-                # These checks include this suite. Do not recursively run them.
-                self.assertEqual(args[2:], ('--bundle', str(directory / 'myCodex')))
-                return
+            self.assertNotIn(str(checkout / 'bin/check-launcher-release'), args,
+                             'publication must not invoke the developer test suite')
             if args[:3] == ('git', 'push', 'origin'):
                 args = ('git', 'push', str(remote), *args[3:])
             return real_run(*args, **kwargs)

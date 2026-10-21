@@ -146,36 +146,16 @@ replacement and ordinary rollback; they cannot prove that GitHub has not withhel
 a newer release. Launcher signatures do not authenticate arbitrary workstation
 images subsequently fetched through mutable image tags.
 
-## Build, qualify, sign and publish locally
+## Build, sign and publish locally
 
-An unsigned development bundle can be built from this checkout with:
-
-```bash
-python3 bin/build-launcher.py 2026.10.1 \
-  --allow-dirty --output-dir /tmp/mycodex-2026.10.1-dev
-```
-
-The output directory must not already exist. Development builds are for testing;
-the signing/publishing command always requires a clean committed checkout.
+Run from a clean committed checkout of the source you intend to release.
 Packaging uses an explicit input list, normalized archive metadata, and no clock
 timestamps, so the same inputs/version/commit produce identical executable bytes.
+The publisher requires Python 3, Git, OpenSSH, Bash and a SHA-256 tool, plus
+authenticated GitHub CLI for publication. It does not run the developer test
+suite or require Docker, a runtime image, ShellCheck, tmux, or a display server.
 
-Run the local checks:
-
-```bash
-./bin/check-launcher-release --bundle /tmp/mycodex-2026.10.1-dev/myCodex
-```
-
-They run syntax/ShellCheck, existing launcher/GPU/tmux suites, and release tests
-using fresh test SSH keys and simulated GitHub downloads. Release tests retain
-their fixtures. No personal signing key is used by the test suite.
-
-Building, signing and publishing the launcher require no Docker daemon or image.
-The default checks use simulated Docker commands. They require Python 3,
-ShellCheck, tmux, Git, OpenSSH and the bundle's host utilities. The existing GUI
-test also needs permission to create a test socket in `/tmp/.X11-unix`.
-
-To build, test and sign locally, with the private key available in your SSH agent:
+To build and sign locally, with the private key available in your SSH agent:
 
 ```bash
 ./bin/release-myCodex 2026.10.1 --signing-key "$HOME/.ssh/id_ed25519.pub"
@@ -184,13 +164,10 @@ To build, test and sign locally, with the private key available in your SSH agen
 To publish, first confirm GitHub CLI authentication with `gh auth status` (use
 `gh auth login` if needed). Write release notes, including any migration
 requirements, outside the checkout, for example `/tmp/mycodex-release-notes.md`.
-Run from a clean committed checkout of the source you intend to release:
+Then publish:
 
 ```bash
-./bin/release-myCodex 2026.10.1 \
-  --signing-key "$HOME/.ssh/id_ed25519.pub" \
-  --notes-file /tmp/mycodex-release-notes.md \
-  --publish
+./bin/release-myCodex 2026.10.1 --signing-key "$HOME/.ssh/id_ed25519.pub" --notes-file /tmp/mycodex-release-notes.md --publish
 ```
 
 `--output-dir` optionally chooses a new directory outside the checkout; otherwise
@@ -200,16 +177,38 @@ uses its private key from your local SSH agent; alternatively, pass the private-
 path directly. Local signing uses OpenSSH SSHSIG; tag signing requires Git with
 SSH signature support (Git 2.34+). The private key stays local.
 
-The publisher builds the bundle and runs the local checks automatically; no
-separate build or test invocation is required. It signs the manifest, verifies
-the SSH-signed tag, pushes only that tag, creates a draft,
-uploads the three assets, downloads and verifies them, and publishes automatically
-after success. It requires `origin` to point to `emsi/myCodex` and authenticated
+The publisher builds the bundle, signs the manifest, verifies the signature and
+executable digest, creates and verifies the SSH-signed tag, pushes only that tag,
+and creates a draft. It uploads the three assets, downloads and verifies them,
+and publishes automatically after success. It requires `origin` to point to
+`emsi/myCodex` and authenticated
 `gh`. No branch push, workflow dispatch or server-side build occurs. Failures
 retain artifacts/drafts; rerunning can resume an identical draft, but never
 overwrites its uploaded assets or a published release. Enable GitHub release
 immutability separately if desired; the publisher does not change repository
 settings. Release notes remain editable GitHub content outside the signed manifest.
+
+### Separate developer checks
+
+Run the developer test suite explicitly when needed. These commands are
+independent of publication and are never invoked by `release-myCodex`:
+
+```bash
+python3 bin/build-launcher.py 2026.10.1 \
+  --allow-dirty --output-dir /tmp/mycodex-2026.10.1-dev
+./bin/check-launcher-release --bundle /tmp/mycodex-2026.10.1-dev/myCodex
+```
+
+The output directory must not already exist. `--allow-dirty` is only for unsigned
+development builds; signing and publishing always require a clean checkout.
+
+The checker runs syntax/ShellCheck, existing launcher/GPU/tmux suites, and release
+tests using fresh test SSH keys and simulated GitHub downloads. Release tests
+retain their fixtures. No personal signing key is used by the test suite.
+The default checks use simulated Docker commands. They require Python 3,
+ShellCheck, tmux, Git, OpenSSH and the bundle's host utilities. The existing GUI
+test also needs permission to create a test socket in `/tmp/.X11-unix`; that
+permission is not needed to sign or publish a release.
 
 ### Optional container test
 
