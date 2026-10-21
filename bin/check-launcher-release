@@ -1,0 +1,46 @@
+#!/usr/bin/env python3
+"""Run local launcher qualification; Docker qualification uses a supplied image."""
+
+import argparse
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def check(bundle=None, runtime_image=None):
+    environment = dict(os.environ)
+    if runtime_image:
+        environment.setdefault("MYCODEX_TEST_COMPOSE", "docker compose")
+    shell_files = ["bin/myCodex", "entrypoint.sh", "bin/build-codex-image.sh",
+                   *[str(path.relative_to(ROOT)) for path in sorted((ROOT / "bin/lib").glob("*.sh"))],
+                   "release/bootstrap.sh"]
+    commands = [["bash", "-n", *shell_files], ["shellcheck", "-x", *shell_files]]
+    commands += [["bash", f"tests/{name}_test.sh"] for name in
+                 ("image-versioning", "launcher-config", "launcher-gui", "launcher-lifecycle")]
+    commands += [[sys.executable, f"tests/{name}_test.py"] for name in
+                 ("launcher-gpu", "tmux-gui", "tmux-gpu", "release")]
+    if bundle:
+        commands += [[str(bundle), "--version"]]
+    if runtime_image:
+        if not bundle:
+            raise ValueError("--runtime-image requires --bundle")
+        commands += [[sys.executable, "tests/release-docker_test.py", str(bundle), runtime_image]]
+    for command in commands:
+        print("Running:", " ".join(command), flush=True)
+        subprocess.run(command, cwd=ROOT, env=environment, check=True)
+    if not runtime_image:
+        print("Local checks passed. Real Docker qualification was not requested; publishing requires it.")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--bundle", type=lambda value: Path(value).resolve())
+    parser.add_argument("--runtime-image", help="already-built workstation image for real Docker qualification")
+    args = parser.parse_args()
+    try:
+        check(args.bundle, args.runtime_image)
+    except (ValueError, OSError, subprocess.CalledProcessError) as error:
+        parser.exit(1, f"check-launcher-release: {error}\n")

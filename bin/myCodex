@@ -85,6 +85,15 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${SCRIPT_PATH}")" && pwd)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 # shellcheck source=bin/lib/mycodex-image.sh
 source "${SCRIPT_DIR}/lib/mycodex-image.sh"
+# shellcheck source=bin/lib/mycodex-release.sh
+source "${SCRIPT_DIR}/lib/mycodex-release.sh"
+mc_release_init
+# Release operations deliberately precede all Docker/project setup and traps.
+case "${1:-}" in
+  --version) mc_release_print_version; exit 0 ;;
+  install) shift; mc_release_install "$@"; exit $? ;;
+  update) shift; mc_release_update "$@"; exit $? ;;
+esac
 # shellcheck source=bin/lib/mycodex-gpu.sh
 source "${SCRIPT_DIR}/lib/mycodex-gpu.sh"
 
@@ -128,6 +137,11 @@ fi
 usage() {
   cat <<'EOF'
 Usage:
+  myCodex --version                 Print launcher version (no Docker required)
+  myCodex install [options]         Install a signed bundle (install --help for options)
+  myCodex update [options]          Update a managed launcher, without changing containers
+  myCodex update --check            Check for a signed launcher release
+  myCodex update --rollback         Restore the previously verified launcher
   myCodex [options]                  Start stack if needed, then attach
   myCodex [options] attach           Attach to tmux session in codex service
   myCodex [options] notices          Attach and reopen the last startup/update notices
@@ -884,7 +898,7 @@ run_docker_compose() {
     CODEX_CONTAINER_NAME="${CONTAINER_NAME}" \
     CODEX_BYOBU_SESSION="${SESSION}" \
     CODEX_AUTO_ATTACH="${AUTO_ATTACH}" \
-    MYCODEX_ATTACH_HINT="${SCRIPT_DIR}/myCodex" \
+    MYCODEX_ATTACH_HINT="${MC_RELEASE_EXECUTABLE}" \
     MYCODEX_LAUNCHED_BY_WRAPPER=1 \
     MYCODEX_STATE_VOLUME_NAME="${STATE_VOLUME_NAME}" \
     MYCODEX_IMAGE_NAME="${IMAGE_NAME}" \
@@ -1176,6 +1190,11 @@ notify_newer_codex() {
 
 attach_with_update_check() {
   local updates
+  updates="$(mc_release_notice 2>/dev/null || true)"
+  if [[ -n "${updates}" ]]; then
+    printf '%s\n' "${updates}" >&2
+    STARTUP_NOTICES+="${STARTUP_NOTICES:+$'\n'}${updates}"
+  fi
   updates="$(notify_newer_codex 2>&1)"
   if [[ -n "${updates}" ]]; then
     printf '%s\n' "${updates}" >&2

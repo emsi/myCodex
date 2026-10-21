@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+"""Build, qualify, and SSH-sign locally; --publish uploads a GitHub release."""
+
+import argparse
+import hashlib
+import importlib.util
+import json
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+sys.dont_write_bytecode = True
+ROOT = Path(__file__).resolve().parents[1]
+SPEC = importlib.util.spec_from_file_location("build_launcher", ROOT / "bin/build-launcher.py")
+builder = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(builder)
+REPOSITORY = "emsi/myCodex"
+ASSETS = ("myCodex", "release.manifest", "release.manifest.sig")
+
+
+def run(*args, capture=False, **kwargs):
+    result = subprocess.run([str(arg) for arg in args], cwd=ROOT, check=True, text=True,
+                            capture_output=capture, **kwargs)
+    return result.stdout.strip() if capture else result
+
+
+def verify(directory):
+    run("bash", "-c", 'set -euo pipefail; source "$1/bin/lib/mycodex-image.sh"; '
+        'source "$1/bin/lib/mycodex-release.sh"; MC_RELEASE_SIGNERS="$1/release/allowed_signers"; '
+        'mc_release_verify_asset "$2"', "verify-release", ROOT, directory)
+
+
+def publish(version, commit, directory, key, notes):
+    remote = builder.git(ROOT, "remote", "get-url", "origin")
+    if remote not in ("https://github.com/emsi/myCodex.git", "https://github.com/emsi/myCodex",
+                      "git@github.com:emsi/myCodex.git", "git@github.com:emsi/myCodex"):
+        raise ValueError("origin must point to emsi/myCodex before publishing")
+    tag = f"v{version}"
+    exists = subprocess.run(["git", "show-ref", "--verify", "--quiet", f"refs/tags/{tag}"], cwd=ROOT).returncode == 0
+    if not exists:
+        run("git", "-c", "gpg.format=ssh", "-c", f"user.signingkey={key}", "tag", "-s", tag,
+            "-m", f"myCodex {version}", commit)
+    if builder.git(ROOT, "rev-parse", f"{tag}^{{}}") != commit:
+        raise ValueError("existing release tag points to a different commit")
+    tag_signers = directory / "tag-allowed-signers"
+    tag_signers.write_text((ROOT / "release/allowed_signers").read_text().replace(
+        'namespaces="mycodex-release"', 'namespaces="git"'))
+    run("git", "-c", "gpg.format=ssh", "-c", f"gpg.ssh.allowedSignersFile={tag_signers}", "verify-tag", tag)
+    run("git", "push", "origin", f"refs/tags/{tag}")
+    # A failed attempt leaves a draft, signed tag and artifacts for inspection.
+    # Resume only an existing draft; never modify a published release or assets.
+    existing = subprocess.run(["gh", "release", "view", tag, "--repo", REPOSITORY,
+                               "--json", "isDraft,assets"], cwd=ROOT, text=True, capture_output=True)
+    if existing.returncode == 0:
+        release = json.loads(existing.stdout)
+        if not release["isDraft"]:
+            raise ValueError("release is already published; use a new version")
+        present = {asset["name"] for asset in release["assets"]}
+    else:
+        command = ["gh", "release", "create", tag, "--repo", REPOSITORY, "--draft", "--verify-tag",
+                   "--title", f"myCodex {version}", "--notes-file", str(notes)]
+        if "-rc." in version:
+            command.append("--prerelease")
+        run(*command)
+        present = set()
+    for name in ASSETS:
+        if name not in present:
+            run("gh", "release", "upload", tag, directory / name, "--repo", REPOSITORY)
+    downloaded = Path(tempfile.mkdtemp(prefix="download-verification.", dir=directory))
+    run("gh", "release", "download", tag, "--repo", REPOSITORY, "--dir", downloaded,
+        *[argument for name in ASSETS for argument in ("--pattern", name)])
+    verify(downloaded)
+    for name in ASSETS:
+        if (downloaded / name).read_bytes() != (directory / name).read_bytes():
+            raise ValueError(f"uploaded {name} differs from the locally verified artifact; draft retained")
+    run("gh", "release", "edit", tag, "--repo", REPOSITORY, "--draft=false",
+        "--latest=false" if "-rc." in version else "--latest")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("version")
+    parser.add_argument("--signing-key", required=True, type=lambda value: Path(value).expanduser().resolve(),
+                        help="local SSH private key, or public key whose private half is in ssh-agent")
+    parser.add_argument("--output-dir", type=lambda value: Path(value).expanduser().resolve(),
+                        help="new directory outside the checkout (default: a retained temporary directory)")
+    parser.add_argument("--runtime-image", help="existing workstation image for real Docker qualification; required to publish")
+    parser.add_argument("--notes-file", type=lambda value: Path(value).expanduser().resolve())
+    parser.add_argument("--publish", action="store_true", help="push the signed tag and publish after local validation")
+    args = parser.parse_args()
+    try:
+        if args.publish and (not args.runtime_image or not args.notes_file or not args.notes_file.is_file()):
+            raise ValueError("--publish requires --runtime-image and an existing --notes-file")
+        if not args.signing_key.is_file():
+            raise ValueError("signing key does not exist")
+        directory = args.output_dir or Path(tempfile.mkdtemp(prefix="mycodex-local-release.")) / "artifacts"
+        if directory == ROOT or ROOT in directory.parents:
+            raise ValueError("release output must be outside the source checkout")
+        commit = builder.git(ROOT, "rev-parse", "HEAD")
+        builder.build(args.version, directory)
+        print(f"Release artifacts retained at {directory}", flush=True)
+        before = hashlib.sha256((directory / "myCodex").read_bytes()).digest()
+        checks = [sys.executable, str(ROOT / "bin/check-launcher-release"), "--bundle", str(directory / "myCodex")]
+        if args.runtime_image:
+            checks += ["--runtime-image", args.runtime_image]
+        run(*checks)
+        if builder.git(ROOT, "rev-parse", "HEAD") != commit or builder.git(ROOT, "status", "--porcelain", "--untracked-files=all"):
+            raise ValueError("source checkout changed during qualification")
+        if hashlib.sha256((directory / "myCodex").read_bytes()).digest() != before:
+            raise ValueError("bundle changed during qualification")
+        run("ssh-keygen", "-Y", "sign", "-f", args.signing_key, "-n", "mycodex-release", directory / "release.manifest")
+        verify(directory)
+        if args.publish:
+            publish(args.version, commit, directory, args.signing_key, args.notes_file)
+        else:
+            print("Signed and verified locally. No tag was created or pushed and no release was published.")
+    except (ValueError, OSError, subprocess.CalledProcessError) as error:
+        parser.exit(1, f"release-myCodex: {error}\n")
+
+
+if __name__ == "__main__":
+    main()

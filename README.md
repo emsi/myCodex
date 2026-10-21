@@ -85,6 +85,12 @@ guidance.
 
 ## Quick Start
 
+For a single-file launcher, see [signed launcher releases](docs/releases.md).
+Releases support user-local installation, explicit `myCodex update`, rollback,
+and cached update notices. They preserve existing development symlinks and are
+built, tested, signed with SSH, and published locally. Launcher releases use
+CalVer independently of the workstation image's Codex-based tags.
+
 Clone the repository:
 
 ```bash
