@@ -170,19 +170,10 @@ They run syntax/ShellCheck, existing launcher/GPU/tmux suites, and release tests
 using fresh test SSH keys and simulated GitHub downloads. Release tests retain
 their fixtures. No personal signing key is used by the test suite.
 
-Before publishing, provide an already-built workstation image to qualify the
-bundle against a real Docker daemon:
-
-```bash
-./bin/check-launcher-release --bundle /tmp/mycodex-2026.10.1-dev/myCodex \
-  --runtime-image mycodex-runtime-test
-```
-
-This checks packaged Compose resources, actual startup, runtime UID/home access,
-device mapping, and preservation of the container on bare reattach. Interactive
-attachment is substituted; the source tmux suites cover the attach helper via
-real PTYs. The Docker test stops and retains its isolated resources and prints
-their names. Physical GPU/desktop hardware is not qualified by this test.
+Building, signing and publishing the launcher require no Docker daemon or image.
+The default checks use simulated Docker commands. They require Python 3,
+ShellCheck, tmux, Git, OpenSSH and the bundle's host utilities. The existing GUI
+test also needs permission to create a test socket in `/tmp/.X11-unix`.
 
 To build, test and sign locally, with the private key available in your SSH agent:
 
@@ -190,23 +181,28 @@ To build, test and sign locally, with the private key available in your SSH agen
 ./bin/release-myCodex 2026.10.1 --signing-key "$HOME/.ssh/id_ed25519.pub"
 ```
 
-To also publish, supply release notes (including migration requirements) and a
-local runtime image. The full local checks run again for the exact bundle:
+To publish, first confirm GitHub CLI authentication with `gh auth status` (use
+`gh auth login` if needed). Write release notes, including any migration
+requirements, outside the checkout, for example `/tmp/mycodex-release-notes.md`.
+Run from a clean committed checkout of the source you intend to release:
 
 ```bash
 ./bin/release-myCodex 2026.10.1 \
   --signing-key "$HOME/.ssh/id_ed25519.pub" \
-  --runtime-image mycodex-runtime-test \
-  --notes-file /path/to/release-notes.md \
+  --notes-file /tmp/mycodex-release-notes.md \
   --publish
 ```
 
 `--output-dir` optionally chooses a new directory outside the checkout; otherwise
-a retained temporary directory is printed. The chosen key must match an allowed
-signer. Local signing uses OpenSSH SSHSIG; tag signing requires Git with SSH
-signature support (Git 2.34+). The private key stays local.
+a retained temporary directory is printed. Replace the example key filename with
+your own. The chosen key must match `release/allowed_signers`. A public-key path
+uses its private key from your local SSH agent; alternatively, pass the private-key
+path directly. Local signing uses OpenSSH SSHSIG; tag signing requires Git with
+SSH signature support (Git 2.34+). The private key stays local.
 
-Publication verifies the SSH-signed tag, pushes only that tag, creates a draft,
+The publisher builds the bundle and runs the local checks automatically; no
+separate build or test invocation is required. It signs the manifest, verifies
+the SSH-signed tag, pushes only that tag, creates a draft,
 uploads the three assets, downloads and verifies them, and publishes automatically
 after success. It requires `origin` to point to `emsi/myCodex` and authenticated
 `gh`. No branch push, workflow dispatch or server-side build occurs. Failures
@@ -214,3 +210,21 @@ retain artifacts/drafts; rerunning can resume an identical draft, but never
 overwrites its uploaded assets or a published release. Enable GitHub release
 immutability separately if desired; the publisher does not change repository
 settings. Release notes remain editable GitHub content outside the signed manifest.
+
+### Optional container test
+
+For additional container testing, explicitly run the checker with an existing
+workstation image. This is independent of signing and publishing and is never
+run by `release-myCodex`:
+
+```bash
+./bin/check-launcher-release --bundle /path/to/myCodex \
+  --runtime-image YOUR_EXISTING_WORKSTATION_IMAGE
+```
+
+This checks packaged Compose resources, actual startup, runtime UID/home access,
+device mapping, and preservation of the container on bare reattach. Interactive
+attachment is substituted; the source tmux suites cover the attach helper via
+real PTYs. The test starts a separate container, stops it afterward, retains its
+resources, and prints their names. Physical GPU/desktop hardware is not qualified
+by this test.

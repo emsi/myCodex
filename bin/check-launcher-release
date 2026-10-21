@@ -32,13 +32,13 @@ def check(bundle=None, runtime_image=None):
         print("Running:", " ".join(command), flush=True)
         subprocess.run(command, cwd=ROOT, env=environment, check=True)
     if not runtime_image:
-        print("Local checks passed. Real Docker qualification was not requested; publishing requires it.")
+        print("Local checks passed. Optional Docker container test was not requested.")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bundle", type=lambda value: Path(value).resolve())
-    parser.add_argument("--runtime-image", help="already-built workstation image for real Docker qualification")
+    parser.add_argument("--runtime-image", help="opt in to a Docker container test using an existing workstation image")
     args = parser.parse_args()
     try:
         check(args.bundle, args.runtime_image)

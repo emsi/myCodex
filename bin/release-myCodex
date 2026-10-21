@@ -85,13 +85,12 @@ def main():
                         help="local SSH private key, or public key whose private half is in ssh-agent")
     parser.add_argument("--output-dir", type=lambda value: Path(value).expanduser().resolve(),
                         help="new directory outside the checkout (default: a retained temporary directory)")
-    parser.add_argument("--runtime-image", help="existing workstation image for real Docker qualification; required to publish")
     parser.add_argument("--notes-file", type=lambda value: Path(value).expanduser().resolve())
     parser.add_argument("--publish", action="store_true", help="push the signed tag and publish after local validation")
     args = parser.parse_args()
     try:
-        if args.publish and (not args.runtime_image or not args.notes_file or not args.notes_file.is_file()):
-            raise ValueError("--publish requires --runtime-image and an existing --notes-file")
+        if args.publish and (not args.notes_file or not args.notes_file.is_file()):
+            raise ValueError("--publish requires an existing --notes-file")
         if not args.signing_key.is_file():
             raise ValueError("signing key does not exist")
         directory = args.output_dir or Path(tempfile.mkdtemp(prefix="mycodex-local-release.")) / "artifacts"
@@ -102,8 +101,6 @@ def main():
         print(f"Release artifacts retained at {directory}", flush=True)
         before = hashlib.sha256((directory / "myCodex").read_bytes()).digest()
         checks = [sys.executable, str(ROOT / "bin/check-launcher-release"), "--bundle", str(directory / "myCodex")]
-        if args.runtime_image:
-            checks += ["--runtime-image", args.runtime_image]
         run(*checks)
         if builder.git(ROOT, "rev-parse", "HEAD") != commit or builder.git(ROOT, "status", "--porcelain", "--untracked-files=all"):
             raise ValueError("source checkout changed during qualification")

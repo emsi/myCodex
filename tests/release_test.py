@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -375,7 +376,7 @@ class ReleaseTest(unittest.TestCase):
         time.sleep(0.1)
         self.assertEqual(len((self.transport / "requests").read_text().splitlines()), count)
 
-    def test_local_publication_signs_tag_and_verifies_upload_before_publish(self):
+    def test_publication_without_runtime_image_signs_and_verifies_before_publish(self):
         # Real SSH tag signing and Git push to a private local bare repository;
         # only the GitHub transport and remote destination are substituted.
         loader = importlib.machinery.SourceFileLoader('publisher', str(ROOT / 'bin/release-myCodex'))
@@ -391,8 +392,13 @@ class ReleaseTest(unittest.TestCase):
         run('git', 'init', '--bare', '-q', remote)
         publisher.ROOT = checkout
         real_run = publisher.run
+        real_build = publisher.builder.build
 
         def local_run(*args, **kwargs):
+            if args[:2] == (sys.executable, str(checkout / 'bin/check-launcher-release')):
+                # These checks include this suite. Do not recursively run them.
+                self.assertEqual(args[2:], ('--bundle', str(directory / 'myCodex')))
+                return
             if args[:3] == ('git', 'push', 'origin'):
                 args = ('git', 'push', str(remote), *args[3:])
             return real_run(*args, **kwargs)
@@ -406,20 +412,25 @@ class ReleaseTest(unittest.TestCase):
         notes = self.temp / 'notes.md'
         notes.write_text('Test release. No migration required.\n')
         directory = self.temp / 'publish-artifacts'
-        shutil.copytree(self.releases / '2026.10.1', directory)
         commit = builder.git(checkout, 'rev-parse', 'HEAD')
-        with patch.dict(os.environ, self.env, clear=True), patch.object(publisher, 'run', local_run):
+        argv = ['release-myCodex', '2026.10.1', '--signing-key', str(self.key),
+                '--output-dir', str(directory), '--notes-file', str(notes), '--publish']
+        with patch.dict(os.environ, self.env, clear=True), patch.object(publisher, 'run', local_run), \
+                patch.object(sys, 'argv', argv), patch.object(publisher.builder, 'build',
+                    side_effect=lambda version, output: real_build(version, output, root=checkout)):
             # A corrupt download leaves a draft. Retrying verifies existing assets
             # and publishes without clobbering any asset or signing key.
             os.environ['TEST_GH_CORRUPT'] = '1'
-            with self.assertRaises(subprocess.CalledProcessError):
-                publisher.publish('2026.10.1', commit, directory, self.key, notes)
+            with self.assertRaises(SystemExit) as error:
+                publisher.main()
+            self.assertEqual(error.exception.code, 1)
             self.assertNotIn('edit', (github / 'calls').read_text().splitlines())
             os.environ.pop('TEST_GH_CORRUPT')
             publisher.publish('2026.10.1', commit, directory, self.key, notes)
             self.assertEqual((github / 'calls').read_text().splitlines()[-1], 'edit')
             with self.assertRaises(ValueError):
                 publisher.publish('2026.10.1', commit, directory, self.key, notes)
+        self.assert_no_docker()
 
     def test_exported_git_environment_does_not_misclassify_installation(self):
         self.install()
