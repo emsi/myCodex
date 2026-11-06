@@ -120,7 +120,9 @@ CONTAINER_HOME="${MYCODEX_CONTAINER_HOME:-${HOME:-/home/${HOST_USER}}}"
 CALLER_DIR="$(pwd -P)"
 CONTAINER_WORKDIR="${MYCODEX_WORKDIR:-${CALLER_DIR}}"
 RAW_NAME="$(basename -- "${CALLER_DIR}")"
-PROJECT_NAME="$(printf '%s' "${RAW_NAME}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9_-]+/-/g; s/^-+//; s/-+$//')"
+# Docker identifiers use ASCII; locale-sensitive ranges can retain Unicode.
+# Compose also requires an alphanumeric first character.
+PROJECT_NAME="$(printf '%s' "${RAW_NAME}" | LC_ALL=C tr '[:upper:]' '[:lower:]' | LC_ALL=C sed -E 's/[^a-z0-9_-]+/-/g; s/^[-_]+//; s/-+$//')"
 
 if [[ -z "${PROJECT_NAME}" ]]; then
   PROJECT_NAME="workspace"

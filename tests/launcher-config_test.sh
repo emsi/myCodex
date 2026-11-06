@@ -96,6 +96,41 @@ MYCODEX_STATE_VOLUME_NAME="custom-state" \
   run_launcher --private-env info >"${private_output}"
 assert_contains "${private_output}" "state volume      sample-project_codex_state [not created yet] (per-project, --private-env)"
 
+# Project identifiers must use Docker's ASCII alphabet regardless of locale.
+# Exercise the real launcher, including the private volume passed to Compose.
+original_project_dir="${project_dir}"
+for test_locale in en_US.utf8 C.utf8 C; do
+  if ! LC_ALL="${test_locale}" locale charmap >/dev/null 2>&1; then
+    continue
+  fi
+  while IFS='|' read -r folder expected; do
+    project_dir="${tmp_dir}/${folder}"
+    mkdir -p -- "${project_dir}"
+    LC_ALL="${test_locale}" run_launcher --private-env info >"${private_output}"
+    assert_contains "${private_output}" "project name      ${expected}"
+    assert_contains "${private_output}" "container name    ${expected}-codex"
+    assert_contains "${private_output}" "state volume      ${expected}_codex_state "
+    export FAKE_COMPOSE_LOG="${tmp_dir}/names-compose.log"
+    export FAKE_COMPOSE_FILES_LOG="${tmp_dir}/names-files.log"
+    export FAKE_COMPOSE_CONFIG_LOG="${tmp_dir}/names-config.log"
+    : >"${FAKE_COMPOSE_LOG}"
+    LC_ALL="${test_locale}" MYCODEX_COMPOSE="${fake_bin}/compose" \
+      run_launcher --private-env config
+    assert_contains "${FAKE_COMPOSE_LOG}" "args=-p ${expected} -f "
+    assert_contains "${FAKE_COMPOSE_LOG}" "state_volume=${expected}_codex_state"
+  done <<'CASES'
+ąś|workspace
+Zażółć GĘŚLĄ|za-g-l
+東京|workspace
+🚀|workspace
+___Project|project
+_-._|workspace
+My.Project 123!|my-project-123
+valid_name-123|valid_name-123
+CASES
+done
+project_dir="${original_project_dir}"
+
 invalid_output="${tmp_dir}/invalid-auto-attach.out"
 if CODEX_AUTO_ATTACH=yes run_launcher info >"${invalid_output}" 2>&1; then
   fail "launcher accepted invalid CODEX_AUTO_ATTACH"
