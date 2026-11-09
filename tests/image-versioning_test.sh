@@ -380,6 +380,9 @@ reset_fake_state
 amd64_output="${tmp_dir}/amd64.out"
 run_build x86_64 amd64 "${amd64_output}" --version 0.146.0 --revision 2 --push
 assert_ref_exists "example.test/workstation:0.146.0-r2-amd64"
+assert_ref_exists "example.test/workstation:latest-amd64"
+assert_ref_missing "example.test/workstation:latest-arm64"
+assert_eq "0.146.0 2" "$(identity_for "${FAKE_REMOTE_IDENTITIES}" example.test/workstation:latest-amd64)" "independent amd64 publication"
 assert_ref_missing "example.test/workstation:0.146.0-r2"
 assert_ref_missing "example.test/workstation:0.146.0"
 assert_contains "${amd64_output}" "pending architecture tags: arm64"
@@ -416,6 +419,8 @@ assert_contains "${retry_output}" "No local image or local aliases were created.
 arm64_first_output="${tmp_dir}/arm64-first.out"
 run_build aarch64 arm64 "${arm64_first_output}" --version 0.147.0 --revision 1 --push
 assert_ref_exists "example.test/workstation:0.147.0-r1-arm64"
+assert_ref_exists "example.test/workstation:latest-arm64"
+assert_ref_missing "example.test/workstation:latest-amd64"
 assert_ref_missing "example.test/workstation:0.147.0-r1"
 assert_contains "${arm64_first_output}" "pending architecture tags: amd64"
 
@@ -657,5 +662,20 @@ fi
 unset FAKE_INSPECT_ERROR_REF
 assert_contains "${registry_error_output}" "cannot determine whether registry tag exists"
 assert_not_contains "${registry_error_output}" "Building example.test/workstation:0.300.0-r1-amd64"
+
+# Per-architecture aliases also reject late older versions and lower revisions.
+reset_fake_state
+for release in '0.167.0 10' '0.166.0 20' '0.167.0 2'; do
+  read -r version revision <<<"${release}"
+  run_build x86_64 amd64 "${tmp_dir}/native-${version}-${revision}.out" \
+    --version "${version}" --revision "${revision}" --push
+done
+assert_eq "0.167.0 10" "$(identity_for "${FAKE_REMOTE_IDENTITIES}" example.test/workstation:latest-amd64)" "native alias cannot go backwards"
+assert_ref_missing "example.test/workstation:latest"
+
+reset_fake_state
+PUBLISH_LATEST=false run_build x86_64 amd64 "${tmp_dir}/no-latest.out" --version 0.167.0 --revision 1 --push
+assert_ref_exists "example.test/workstation:0.167.0-r1-amd64"
+assert_ref_missing "example.test/workstation:latest-amd64"
 
 printf 'PASS: image release versioning and split-builder publication\n'

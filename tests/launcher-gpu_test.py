@@ -54,7 +54,11 @@ state_file = pathlib.Path(os.environ['TEST_STATE'])
 state = json.loads(state_file.read_text())
 with open(os.environ['TEST_LOG'], 'a') as log:
     log.write(json.dumps({'docker': args}) + '\n')
-if args[:2] == ['context', 'show']:
+if args[:2] == ['version', '--format']:
+    print('amd64')
+elif args[:2] == ['image', 'tag']:
+    pass
+elif args[:2] == ['context', 'show']:
     print(os.environ.get('DOCKER_CONTEXT', 'default'))
 elif args[:2] == ['context', 'inspect']:
     print(os.environ.get('TEST_ENDPOINT', 'unix:///var/run/docker.sock'))
@@ -67,7 +71,9 @@ elif args[:2] == ['volume', 'inspect']:
     pass
 elif args[:2] == ['image', 'inspect']:
     if '--format' in args:
-        print('sha256:new')
+        old = args[-1] == 'sha256:' + 'b' * 64 or args[-1].endswith('-' + 'b' * 12)
+        image_id = 'sha256:' + ('b' if old else 'a') * 64
+        print(image_id + '|0.147.0|' + ('1' if old else '2') if '|' in args[args.index('--format')+1] else image_id)
 elif args[0] == 'inspect':
     if not state['exists']: sys.exit(1)
     if args[1] == '--format':
@@ -77,7 +83,8 @@ elif args[0] == 'inspect':
         elif 'mycodex.gpu' in template: print(state.get('gpu', '<no value>'))
         elif 'mycodex.gui' in template: print(state.get('gui', 'none'))
         elif 'config-hash' in template: print('a' * 64)
-        elif '.Image' in template: print('sha256:old')
+        elif '.Config.Image' in template: print('ghcr.io/infrasecture/harness-workstation:latest')
+        elif '.Image' in template: print('sha256:' + 'b' * 64)
         elif 'State.Status' in template: print('running' if state['running'] else 'exited')
         else: sys.exit(2)
 elif args[0] == 'exec':

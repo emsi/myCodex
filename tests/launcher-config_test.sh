@@ -39,7 +39,16 @@ set -euo pipefail
 case "${1:-} ${2:-}" in
   "volume inspect") exit 1 ;;
   "volume create") printf '%s\n' "${3}" ;;
-  "image inspect") exit 0 ;;
+  "version --format") printf 'amd64\n' ;;
+  "image inspect")
+    if [[ " $* " == *' --format '* ]]; then
+      case "$4" in
+        *'|'*) printf '%s|0.147.0|1\n' "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" ;;
+        *) printf '%s\n' "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" ;;
+      esac
+    fi
+    ;;
+  "image tag") exit 0 ;;
   *) printf 'unexpected fake docker invocation: %s\n' "$*" >&2; exit 1 ;;
 esac
 EOF
