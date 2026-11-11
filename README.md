@@ -50,6 +50,8 @@ Do not mount host credentials unless the agent genuinely needs them.
 Runtime requirements:
 
 - Docker configured for Linux containers, including VM-backed Docker on macOS;
+  Docker Engine 29+ supports the default small project subnets. On older engines,
+  export `MYCODEX_NETWORK_SUBNET=` to retain Docker's default allocation;
 - Docker Compose v2;
 - Bash 4.4 or newer;
 - GNU-compatible `realpath -m` behavior. Linux coreutils normally provides it.
@@ -451,6 +453,54 @@ configuration, applies optional volume, device, device cgroup rule, and Compose
 overrides, starts the workstation when necessary, waits for its tmux session,
 and attaches.
 
+### Project Networks
+
+Each project keeps its own Docker bridge network and service-name DNS. New
+networks request `0.0.0.0/28`: Docker Engine 29+ selects an available `/28` from
+its address pools, avoiding a fixed subnet shared by every project. This uses
+16 addresses rather than the 65,536 addresses in a `/16` (4,096 times less),
+with room for 13 container addresses after the network, broadcast, and gateway
+addresses. No Docker daemon configuration change is needed, and other Docker
+projects are unaffected.
+
+For projects with more containers, select a larger automatically allocated
+subnet, for example `export MYCODEX_NETWORK_SUBNET=0.0.0.0/24`. To retain the
+daemon's default allocation, including on Docker Engine versions before 29,
+use `export MYCODEX_NETWORK_SUBNET=`. An explicit CIDR is also accepted, but
+you must choose a separate, non-overlapping subnet for each project. Keep the
+setting consistent when running subsequent myCodex commands. If a Compose
+override manages IPAM itself, set `MYCODEX_NETWORK_SUBNET=` and replace the
+default network's `ipam.config` list rather than appending another subnet.
+
+Existing networks do not shrink in place. A normal attachment to a running
+container keeps it running; `up` can reconcile the changed network configuration
+and interrupt its containers. To migrate deliberately, finish any active work
+and run these commands from each affected project with the updated launcher
+(repeat any usual `--private-env`, GUI, GPU, mount, or Compose options):
+
+```bash
+myCodex down
+myCodex up -d
+```
+
+`down` removes that project's containers and network, ending its sessions and
+discarding files in the containers' writable layers. The mounted workspace and
+state volume remain; do not add `-v`. If the address pools are already exhausted,
+free at least one existing large project network this way before creating new
+small ones. `stop` alone retains the network and its address allocation. No
+networks are automatically pruned.
+
+Inspect the resulting subnet (substitute the project network name shown by
+`docker network ls`):
+
+```bash
+docker network inspect git_default --format '{{json .IPAM.Config}}'
+```
+
+See Docker's [subnet allocation documentation](https://docs.docker.com/engine/network/#subnet-allocation).
+Docker warns that networks allocated with an unspecified address require
+Engine 29+ even after creation; recreate them before downgrading the daemon.
+
 ### Identity And Paths
 
 The wrapper passes the caller's numeric UID/GID, username, primary and
@@ -701,6 +751,7 @@ run the newly built version without a registry pull.
 | `MYCODEX_STARTUP_PROGRESS_INTERVAL_SECONDS` | `2` | Maximum seconds between repeated startup progress messages. |
 | `MYCODEX_COMPOSE` | `docker compose` | Orchestrator command invoked for all Compose operations. Override to wrap Compose without forking `myCodex`, e.g. `vaka --vaka-file=/path/vaka.yaml compose` to enforce an egress policy. Word-split into argv, so paths in it must not contain spaces. |
 | `MYCODEX_STATE_VOLUME_NAME` | `codex_state` | Shared/custom Docker volume mounted as the runtime home. `--private-env` takes precedence and uses `<project>_codex_state`. |
+| `MYCODEX_NETWORK_SUBNET` | `0.0.0.0/28` | Project bridge subnet. Docker Engine 29+ automatically selects a free subnet of this size. Use `0.0.0.0/24` for more containers, an explicit non-overlapping CIDR for a fixed subnet, or an explicitly empty value for the daemon's default allocation (also supported on older engines). Existing networks require recreation to resize. |
 | `MYCODEX_IMAGE_NAME` | `ghcr.io/infrasecture/harness-workstation` | Image name used by build and runtime helpers. |
 | `MYCODEX_IMAGE_TAG` | `latest` | Runtime image tag. Set an immutable revision-qualified release to pin a workstation image. |
 | `MYCODEX_AUTO_PULL` | `1` | Refresh `latest` before starting an inactive project. Set to `0` to use cached images; missing images are still pulled. Running containers and other tags are never automatically refreshed. |

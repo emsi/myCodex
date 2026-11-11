@@ -33,6 +33,14 @@ services:
       - ${WORKSPACE_DIR:-./}:${MYCODEX_WORKDIR:-/workspace}
       - codex_state:${MYCODEX_CONTAINER_HOME:-/home/codex}
 
+networks:
+  default:
+    ipam:
+      config:
+        # Docker 29+ chooses a free /28 from its pools (13 container addresses).
+        # An explicitly empty value restores the daemon's default subnet size.
+        - subnet: ${MYCODEX_NETWORK_SUBNET-0.0.0.0/28}
+
 volumes:
   codex_state:
     name: ${MYCODEX_STATE_VOLUME_NAME:-codex_state}

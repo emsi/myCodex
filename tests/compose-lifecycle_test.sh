@@ -42,6 +42,22 @@ printf 'FROM %s\nLABEL mycodex.test.revision=next\n' "$image" \
 next_id="$(docker image inspect --format '{{.Id}}' "$MYCODEX_TEST_NEXT_IMAGE")"
 
 bash "$root/bin/myCodex" up -d --wait
+# Exercise Engine allocation, not just Compose's rendering of 0.0.0.0/28.
+network="${CODEX_CONTAINER_NAME}_default"
+network_id="$(docker network inspect --format '{{.Id}}' "$network")"
+docker network inspect --format '{{json .IPAM.Config}}' "$network" \
+  | python3 -c '
+import ipaddress, json, sys
+config = json.load(sys.stdin)
+ipv4 = [item for item in config if ipaddress.ip_network(item["Subnet"]).version == 4]
+assert len(ipv4) == 1, config
+subnet = ipaddress.ip_network(ipv4[0]["Subnet"])
+assert subnet.prefixlen == 28 and not subnet.network_address.is_unspecified, config
+assert ipaddress.ip_address(ipv4[0]["Gateway"]) in subnet, config
+'
+# Docker reports the chosen CIDR; Compose must still reuse the network on up.
+bash "$root/bin/myCodex" up -d --wait
+[[ "$(docker network inspect --format '{{.Id}}' "$network")" == "$network_id" ]]
 old_container="$(docker inspect --format '{{.Id}}' "$CODEX_CONTAINER_NAME")"
 bash "$root/bin/myCodex" stop
 bash "$root/bin/myCodex"
