@@ -50,6 +50,8 @@ Do not mount host credentials unless the agent genuinely needs them.
 Runtime requirements:
 
 - Docker configured for Linux containers, including VM-backed Docker on macOS;
+  Docker Engine 29+ supports the default small project subnets. On older engines,
+  export `MYCODEX_NETWORK_SUBNET=` to retain Docker's default allocation;
 - Docker Compose v2;
 - Bash 4.4 or newer;
 - GNU-compatible `realpath -m` behavior. Linux coreutils normally provides it.
@@ -112,7 +114,7 @@ cd project
 myCodex
 ```
 
-The launcher refreshes the published `latest` image before starting an inactive project,
+The launcher checks published images before starting an inactive project, keeps a newer local build,
 starts the container if needed, waits for the tmux session to be ready, and
 attaches to it. Building locally is optional and documented under
 [Image Builds](#image-builds).
@@ -133,6 +135,10 @@ the tag only, without the image repository or a leading `v`:
 ```bash
 MYCODEX_IMAGE_TAG=0.146.0-r2 myCodex
 ```
+
+Architecture tags can be selected directly, even before the other architecture
+has been published: `MYCODEX_IMAGE_TAG=0.167.0-r1-amd64 myCodex`. Default startup
+also discovers partial releases through `latest-amd64` or `latest-arm64`.
 
 That form starts the selected image when the project has no existing container.
 When switching an existing project, export the selection, pull it explicitly,
@@ -451,6 +457,54 @@ configuration, applies optional volume, device, device cgroup rule, and Compose
 overrides, starts the workstation when necessary, waits for its tmux session,
 and attaches.
 
+### Project Networks
+
+Each project keeps its own Docker bridge network and service-name DNS. New
+networks request `0.0.0.0/28`: Docker Engine 29+ selects an available `/28` from
+its address pools, avoiding a fixed subnet shared by every project. This uses
+16 addresses rather than the 65,536 addresses in a `/16` (4,096 times less),
+with room for 13 container addresses after the network, broadcast, and gateway
+addresses. No Docker daemon configuration change is needed, and other Docker
+projects are unaffected.
+
+For projects with more containers, select a larger automatically allocated
+subnet, for example `export MYCODEX_NETWORK_SUBNET=0.0.0.0/24`. To retain the
+daemon's default allocation, including on Docker Engine versions before 29,
+use `export MYCODEX_NETWORK_SUBNET=`. An explicit CIDR is also accepted, but
+you must choose a separate, non-overlapping subnet for each project. Keep the
+setting consistent when running subsequent myCodex commands. If a Compose
+override manages IPAM itself, set `MYCODEX_NETWORK_SUBNET=` and replace the
+default network's `ipam.config` list rather than appending another subnet.
+
+Existing networks do not shrink in place. A normal attachment to a running
+container keeps it running; `up` can reconcile the changed network configuration
+and interrupt its containers. To migrate deliberately, finish any active work
+and run these commands from each affected project with the updated launcher
+(repeat any usual `--private-env`, GUI, GPU, mount, or Compose options):
+
+```bash
+myCodex down
+myCodex up -d
+```
+
+`down` removes that project's containers and network, ending its sessions and
+discarding files in the containers' writable layers. The mounted workspace and
+state volume remain; do not add `-v`. If the address pools are already exhausted,
+free at least one existing large project network this way before creating new
+small ones. `stop` alone retains the network and its address allocation. No
+networks are automatically pruned.
+
+Inspect the resulting subnet (substitute the project network name shown by
+`docker network ls`):
+
+```bash
+docker network inspect git_default --format '{{json .IPAM.Config}}'
+```
+
+See Docker's [subnet allocation documentation](https://docs.docker.com/engine/network/#subnet-allocation).
+Docker warns that networks allocated with an unspecified address require
+Engine 29+ even after creation; recreate them before downgrading the daemon.
+
 ### Identity And Paths
 
 The wrapper passes the caller's numeric UID/GID, username, primary and
@@ -510,27 +564,47 @@ Updating the host launcher alone cannot change shell files inside an older image
 
 ### Image Resolution
 
-Ordinary startup uses `MYCODEX_IMAGE_TAG` when set and `latest` otherwise. Before
-starting an inactive project using `latest`, the launcher pulls that reference
-even when it is cached. A failed pull falls back to the cached image with a
-visible warning; without a cached image it fails. Other tags are pulled only
-when missing. Set `MYCODEX_AUTO_PULL=0` to use cached images without a refresh.
-This is independent of the informational `MYCODEX_UPDATE_CHECK` setting.
+Ordinary startup honors an explicit `MYCODEX_IMAGE_TAG`. The default `latest`
+selection checks both `latest-<architecture>` and the multi-platform `latest`,
+using the **Docker server's** architecture (including remote Docker contexts).
+Native aliases become available as soon as that architecture is pushed; they do
+not wait for the other builders. Older registries without these aliases continue
+to work through `latest`.
 
-A new container starts with `--no-build --pull never` after image selection.
-A stopped container using `latest` is replaced when the image ID changed and
-Compose's service configuration hash matches its original configuration. This
-preserves its home/workspace volumes and GUI mode; files stored only in the
-container's writable layer are replaced along with the image. A changed or
-unverifiable configuration (for example omitted `-v`, `--device`,
-`--device-cgroup-rule`, or `-f` options) keeps the original container and reports
-how to apply the update explicitly. `myCodex start` always starts the original
-container without refreshing or replacing it.
-A running container is never pulled or replaced merely because `latest` moved.
-Persistent environment settings (such as a custom state volume or session name)
-do not request recreation on each attach; use `up` to apply changed defaults.
-`myCodex pull` only pulls the selected Compose service; use `myCodex up -d`
-explicitly to apply a pulled image to a running container.
+Before pulling, the launcher preserves cached image IDs under stable local tags.
+It compares Codex versions and then image revisions, retaining the newest local
+or downloaded release. An older registry alias cannot downgrade a newer local
+build or stopped container. Equal releases keep the cached image, including local
+rebuilds. Images without usable release labels remain usable under a content-based
+tag; their relative age cannot be determined, so an existing cached image wins
+unless a candidate has valid version/revision labels. The chosen image also
+becomes local `latest`, so a later invocation retains the same selection.
+
+A failed refresh falls back to the cached image; without a cached image it fails.
+Stopped containers retain their original image and mounts when all pulls fail.
+Explicit tags are pulled only when missing. `MYCODEX_AUTO_PULL=0` disables the
+default refresh; this is independent of `MYCODEX_UPDATE_CHECK`.
+
+Default-managed containers are created with a local reference such as
+`0.167.0-r1-7c2e3b669497` and `--no-build --pull never`. The image-ID suffix keeps
+that reference stable even if the same release is rebuilt locally. Existing
+containers retain their original reference until they are recreated; moving
+`latest` may therefore still make an old container appear as an ID in `docker ps`.
+That display does not mean its image or version tags were deleted. The launcher
+never removes image tags, and refuses to overwrite a conflicting runtime tag.
+Explicit tags and caller-supplied `up/create --build` or `--pull` options retain
+Compose's normal selection behavior.
+
+A stopped container is updated only when its full original Compose configuration
+can be reproduced. The comparison uses its original image reference, allowing a
+new versioned name without ignoring changed mounts, environment, GUI or GPU
+options. Its persistent volumes survive; its writable container layer is replaced.
+Omitted or unverifiable options keep the original container and report how to
+update explicitly. `myCodex start` always preserves the existing container.
+A running container is never pulled or replaced by an ordinary attach. Bare
+configuration reconciliation preserves its current image; `myCodex up -d` is the
+explicit apply operation. `myCodex pull` refreshes the default image selection
+without recreating a container and reports failure if neither source is reachable.
 
 Before an interactive attach, the launcher compares the running Codex version
 with the selected local image's version and performs a short, best-effort check
@@ -633,7 +707,7 @@ ARCHS=arm64 ./bin/build-codex-image.sh --version 0.146.0 --push
 
 The builders independently derive the same build-input digest and revision, and
 may run in either order. The first push publishes its immutable architecture
-tag and reports which architectures are pending. The push that finds the
+tag, advances `latest-amd64` or `latest-arm64`, and reports pending architectures. The push that finds the
 complete `RELEASE_ARCHS` set verifies every architecture's identity, creates
 the immutable multi-platform manifest, and evaluates its moving aliases. A
 retry that finds its matching immutable architecture tag already in the
@@ -641,7 +715,7 @@ registry does not pull it and does not create local
 `<version>-r<revision>`, `<version>`, or `latest` aliases. A stale local tag with
 different metadata is rebuilt rather than pushed into the selected release.
 
-Moving aliases are monotonic. Before changing `<version>` or `latest`, the
+Moving aliases are monotonic. Before changing `<version>`, `latest`, or a native alias, the
 publisher reads the Codex version and image revision labels embedded in every
 platform image. An older Codex version or lower revision cannot replace a newer
 alias. This also protects `latest` when an architecture for an older partial
@@ -655,8 +729,8 @@ Codex version. Legacy immutable architecture or manifest tags remain occupied
 and are skipped by automatic revision selection because their build inputs
 cannot be proven equivalent.
 
-Normal `--push` retries leave all aliases unchanged when the immutable release
-manifest already exists. If both architecture tags were pushed without
+Normal `--push` retries repair missing or stale native aliases but leave the
+multi-platform aliases unchanged when the immutable release manifest exists. If both architecture tags were pushed without
 finalization, or an alias update failed after the immutable manifest was
 created, run:
 
@@ -666,7 +740,7 @@ created, run:
 
 `--manifest` is the explicit finalization and recovery operation. Automatic
 selection finds the matching partial or complete release. It rechecks the
-moving `<version>` alias and, unless `PUBLISH_LATEST=false`, `latest`, even when
+moving `<version>` alias and, unless `PUBLISH_LATEST=false`, `latest` and native aliases, even when
 the immutable manifest already exists. It does not bypass identity or monotonic
 protection. Pass `--revision` when recovering an explicitly selected release.
 
@@ -681,11 +755,13 @@ The helper builds arch-specific staging tags and publishes manifest tags:
 - `ghcr.io/infrasecture/harness-workstation:<codex-version>-r<revision>-arm64`
 - `ghcr.io/infrasecture/harness-workstation:<codex-version>-r<revision>` (immutable)
 - `ghcr.io/infrasecture/harness-workstation:<codex-version>` (moving alias)
-- `ghcr.io/infrasecture/harness-workstation:latest` (moving alias)
+- `ghcr.io/infrasecture/harness-workstation:latest-amd64` (moving native alias)
+- `ghcr.io/infrasecture/harness-workstation:latest-arm64` (moving native alias)
+- `ghcr.io/infrasecture/harness-workstation:latest` (moving multi-platform alias)
 
 Local builds also tag the native image as
-`<codex-version>-r<revision>`, `<codex-version>`, and `latest` so `myCodex` can
-run the newly built version without a registry pull.
+`<codex-version>-r<revision>`, `<codex-version>`, `latest-<architecture>`, and
+`latest`. Default startup keeps a newer local build even when the registry lags.
 
 ## Configuration
 
@@ -701,9 +777,10 @@ run the newly built version without a registry pull.
 | `MYCODEX_STARTUP_PROGRESS_INTERVAL_SECONDS` | `2` | Maximum seconds between repeated startup progress messages. |
 | `MYCODEX_COMPOSE` | `docker compose` | Orchestrator command invoked for all Compose operations. Override to wrap Compose without forking `myCodex`, e.g. `vaka --vaka-file=/path/vaka.yaml compose` to enforce an egress policy. Word-split into argv, so paths in it must not contain spaces. |
 | `MYCODEX_STATE_VOLUME_NAME` | `codex_state` | Shared/custom Docker volume mounted as the runtime home. `--private-env` takes precedence and uses `<project>_codex_state`. |
+| `MYCODEX_NETWORK_SUBNET` | `0.0.0.0/28` | Project bridge subnet. Docker Engine 29+ automatically selects a free subnet of this size. Use `0.0.0.0/24` for more containers, an explicit non-overlapping CIDR for a fixed subnet, or an explicitly empty value for the daemon's default allocation (also supported on older engines). Existing networks require recreation to resize. |
 | `MYCODEX_IMAGE_NAME` | `ghcr.io/infrasecture/harness-workstation` | Image name used by build and runtime helpers. |
-| `MYCODEX_IMAGE_TAG` | `latest` | Runtime image tag. Set an immutable revision-qualified release to pin a workstation image. |
-| `MYCODEX_AUTO_PULL` | `1` | Refresh `latest` before starting an inactive project. Set to `0` to use cached images; missing images are still pulled. Running containers and other tags are never automatically refreshed. |
+| `MYCODEX_IMAGE_TAG` | `latest` | Image selection. Default `latest` chooses the newest identifiable native/cached release and creates a stable runtime reference; other tags remain explicit pins. |
+| `MYCODEX_AUTO_PULL` | `1` | Check native and multi-platform aliases before starting an inactive project, without downgrading newer local releases. Set to `0` to use cached images; missing images are still pulled. Running containers and explicit tags are never automatically refreshed. |
 | `MYCODEX_UPDATE_CHECK` | `1` | Before interactive attach, report a newer upstream Codex version when one can be determined quickly. Set to `0` to disable. |
 | `MYCODEX_CONTAINER_HOME` | host `$HOME` via `myCodex` | Runtime home path mounted from the persistent state volume. |
 | `MYCODEX_WORKDIR` | current directory via `myCodex` | Container workdir and workspace bind target. |
@@ -717,7 +794,7 @@ run the newly built version without a registry pull.
 | `MYCODEX_CODEX_NPM_PACKAGE` | `@openai/codex` | npm package used for latest-version discovery. |
 | `ARCHS` | native arch | Architectures built by `build-codex-image.sh`; `--release` defaults to `RELEASE_ARCHS`. |
 | `RELEASE_ARCHS` | `amd64 arm64` | Complete architecture set required before publishing an immutable release manifest. |
-| `PUBLISH_LATEST` | `true` | Whether eligible `--push`/`--manifest` promotions include `latest`. This never bypasses monotonic protection. |
+| `PUBLISH_LATEST` | `true` | Whether eligible `--push`/`--manifest` promotions include `latest` and native update aliases. This never bypasses monotonic protection. |
 
 ### Wrapper-Provided Compose Values
 

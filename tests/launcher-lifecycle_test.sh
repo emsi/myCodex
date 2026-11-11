@@ -40,15 +40,42 @@ set -euo pipefail
 printf 'docker %s\n' "$*" >>"${FAKE_DOCKER_LOG}"
 
 case "${1:-} ${2:-}" in
+  "version --format") printf '%s\n' "${FAKE_SERVER_ARCH:-amd64}" ;;
   "volume inspect") exit 0 ;;
   "image inspect")
-    [[ -f "${FAKE_IMAGE_STATE}" ]] || exit 1
+    ref="${!#}"
+    if [[ "${ref}" == sha256:* ]]; then
+      file="${FAKE_IMAGE_STATE}.${ref}"
+      if [[ ! -f "${file}" && "${ref}" == "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" ]]; then
+        printf '%s|%s|1\n' "${ref}" "${FAKE_CURRENT_CODEX_VERSION:-0.147.0}" >"${file}"
+      fi
+    elif [[ "${ref##*:}" == latest ]]; then file="${FAKE_IMAGE_STATE}"
+    else
+      file="${FAKE_IMAGE_STATE}.${ref##*:}"
+      if [[ ! -f "${file}" && "${ref}" != *:latest-* && ! "${ref}" =~ -[a-f0-9]{12}$ ]]; then
+        file="${FAKE_IMAGE_STATE}"
+      fi
+    fi
+    [[ -f "${file}" ]] || exit 1
+    IFS='|' read -r id version revision <"${file}" || true
+    id="${id:-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}"
+    version="${version:-${FAKE_SELECTED_CODEX_VERSION:-0.147.0}}"
+    revision="${revision:-1}"
+    printf '%s|%s|%s\n' "${id}" "${version}" "${revision}" >"${FAKE_IMAGE_STATE}.${id}"
     if [[ " $* " == *' --format '* ]]; then
       case "$4" in
-        *'.Id'*) cat "${FAKE_IMAGE_STATE}" ;;
-        *) printf '%s\n' "${FAKE_SELECTED_CODEX_VERSION:-0.147.0}" ;;
+        *'|'*) printf '%s|%s|%s\n' "${id}" "${version}" "${revision}" ;;
+        *'.Id'*) printf '%s\n' "${id}" ;;
+        *) printf '%s\n' "${version}" ;;
       esac
     fi
+    ;;
+  "image tag")
+    source="${FAKE_IMAGE_STATE}.$3"
+    [[ -f "${source}" ]] || exit 1
+    if [[ "${4##*:}" == latest ]]; then target="${FAKE_IMAGE_STATE}"
+    else target="${FAKE_IMAGE_STATE}.${4##*:}"; fi
+    cp "${source}" "${target}"
     ;;
   "inspect --format")
     case "$3" in
@@ -59,7 +86,8 @@ case "${1:-} ${2:-}" in
           printf '%s\n' "${FAKE_CONTAINER_STATUS:-exited}"
         fi
         ;;
-      *'.Image'*) printf 'sha256:old\n' ;;
+      *'.Config.Image'*) printf '%s\n' "${FAKE_CONFIGURED_IMAGE:-ghcr.io/infrasecture/harness-workstation:latest}" ;;
+      *'.Image'*) printf 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' ;;
       *config-hash*) printf '%s\n' "${FAKE_CURRENT_HASH:-${FAKE_HASH}}" ;;
       *mycodex.codex.version*) printf '%s\n' "${FAKE_LABEL_CODEX_VERSION-${FAKE_CURRENT_CODEX_VERSION:-0.147.0}}" ;;
       *mycodex.gui*) printf 'none\n' ;;
@@ -100,6 +128,7 @@ if [[ "$1" == exec ]]; then
   exit
 fi
 printf 'compose %s\n' "$*" >>"${FAKE_COMPOSE_LOG}"
+printf 'image=%s\n' "${MYCODEX_IMAGE_TAG}" >>"${FAKE_COMPOSE_LOG}"
 
 case " $* " in
   *' ps --status running --services '*)
@@ -110,9 +139,23 @@ case " $* " in
     ;;
   *' pull codex '*)
     [[ "${FAKE_PULL_FAILURE:-0}" != 1 ]] || exit 1
-    printf '%s\n' "${FAKE_PULLED_IMAGE:-sha256:new}" >"${FAKE_IMAGE_STATE}"
+    if [[ "${MYCODEX_IMAGE_TAG}" == latest && "${FAKE_LEGACY_PULL_FAILURE:-0}" == 1 ]]; then exit 1; fi
+    file="${FAKE_IMAGE_STATE}"
+    version="${FAKE_PULLED_VERSION:-${FAKE_SELECTED_CODEX_VERSION:-0.147.0}}"
+    revision="${FAKE_PULLED_REVISION:-2}"
+    id="${FAKE_PULLED_IMAGE:-sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb}"
+    if [[ "${MYCODEX_IMAGE_TAG}" == latest-* ]]; then
+      [[ -n "${FAKE_NATIVE_CODEX_VERSION:-}" ]] || exit 1
+      file="${file}.${MYCODEX_IMAGE_TAG}"
+      version="${FAKE_NATIVE_CODEX_VERSION}"
+      revision="${FAKE_NATIVE_REVISION:-1}"
+      id="sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    elif [[ "${id}" == sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ]]; then
+      revision=1
+    fi
+    printf '%s|%s|%s\n' "${id}" "${version}" "${revision}" >"${file}"
     ;;
-  *' up '*|*' start '*) touch "${FAKE_STARTED}" ;;
+  *' up '*|*' start '*|*' create '*) touch "${FAKE_STARTED}" ;;
   *' config --hash codex '*)
     [[ "${FAKE_HASH_FAILURE:-0}" != 1 ]] || exit 1
     printf 'codex %s\n' "${FAKE_DESIRED_HASH:-${FAKE_HASH}}"
@@ -138,7 +181,7 @@ reset_state() {
   : >"${FAKE_DOCKER_LOG}"
   : >"${FAKE_COMPOSE_LOG}"
   : >"${FAKE_NOTICE_LOG}"
-  rm -f -- "${FAKE_IMAGE_STATE}" "${FAKE_STARTED}"
+  rm -f -- "${FAKE_IMAGE_STATE}" "${FAKE_IMAGE_STATE}".* "${FAKE_STARTED}"
 }
 
 run_launcher() {
@@ -240,7 +283,7 @@ reset_state
 touch "${FAKE_IMAGE_STATE}"
 stopped_local_output="${tmp_dir}/stopped-local.out"
 FAKE_RUNNING=0 MYCODEX_UPDATE_CHECK=0 run_launcher >"${stopped_local_output}" 2>&1
-assert_contains "${FAKE_DOCKER_LOG}" "image inspect ghcr.io/infrasecture/harness-workstation:latest"
+assert_contains "${FAKE_DOCKER_LOG}" "ghcr.io/infrasecture/harness-workstation:latest"
 assert_contains "${FAKE_COMPOSE_LOG}" "up -d --no-build --pull never codex"
 assert_contains "${FAKE_COMPOSE_LOG}" "pull codex"
 assert_not_contains "${FAKE_DOCKER_LOG}" "curl --connect-timeout"
@@ -248,7 +291,7 @@ assert_not_contains "${FAKE_DOCKER_LOG}" "curl --connect-timeout"
 reset_state
 stopped_missing_output="${tmp_dir}/stopped-missing.out"
 FAKE_RUNNING=0 MYCODEX_UPDATE_CHECK=0 run_launcher >"${stopped_missing_output}" 2>&1
-assert_contains "${stopped_missing_output}" "checking published image ghcr.io/infrasecture/harness-workstation:latest"
+assert_contains "${stopped_missing_output}" "checking published images for amd64"
 assert_contains "${FAKE_COMPOSE_LOG}" "pull codex"
 assert_contains "${FAKE_COMPOSE_LOG}" "up -d --no-build --pull never codex"
 
@@ -257,7 +300,7 @@ running_reconcile_output="${tmp_dir}/running-reconcile.out"
 FAKE_RUNNING=1 MYCODEX_UPDATE_CHECK=0 run_launcher --private-env >"${running_reconcile_output}" 2>&1
 assert_contains "${FAKE_COMPOSE_LOG}" "up -d --no-build --pull never codex"
 assert_not_contains "${FAKE_COMPOSE_LOG}" " pull "
-assert_not_contains "${FAKE_DOCKER_LOG}" "image inspect"
+assert_contains "${FAKE_COMPOSE_LOG}" "image=0.147.0-r1-aaaaaaaaaaaa"
 
 for option in --device --device-cgroup-rule; do
   value=/dev/dri
@@ -292,7 +335,7 @@ assert_not_contains "${FAKE_COMPOSE_LOG}" " pull "
 # A stopped container can be replaced only when its complete configuration is
 # reproducible. Covers old images with the same Codex version but new revisions.
 reset_state
-printf 'sha256:old\n' >"${FAKE_IMAGE_STATE}"
+printf 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' >"${FAKE_IMAGE_STATE}"
 FAKE_CONTAINER_EXISTS=1 MYCODEX_UPDATE_CHECK=0 run_launcher >"${tmp_dir}/upgrade.out" 2>&1
 assert_contains "${FAKE_COMPOSE_LOG}" "pull codex"
 assert_contains "${FAKE_COMPOSE_LOG}" "config --hash codex"
@@ -316,7 +359,7 @@ for reason in changed_config legacy_metadata unsupported_compose; do
 done
 
 reset_state
-FAKE_CONTAINER_EXISTS=1 FAKE_PULLED_IMAGE=sha256:old MYCODEX_UPDATE_CHECK=0 \
+FAKE_CONTAINER_EXISTS=1 FAKE_PULLED_IMAGE=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa MYCODEX_UPDATE_CHECK=0 \
   run_launcher >"${tmp_dir}/unchanged.out" 2>&1
 assert_contains "${FAKE_COMPOSE_LOG}" "start codex"
 assert_not_contains "${FAKE_COMPOSE_LOG}" " up "
@@ -329,7 +372,7 @@ assert_contains "${FAKE_COMPOSE_LOG}" "up -d --no-build --pull never codex"
 assert_contains "${FAKE_NOTICE_LOG}" "image refresh failed; using the cached"
 
 reset_state
-printf 'sha256:older\n' >"${FAKE_IMAGE_STATE}"
+printf 'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\n' >"${FAKE_IMAGE_STATE}"
 FAKE_CONTAINER_EXISTS=1 FAKE_PULL_FAILURE=1 MYCODEX_UPDATE_CHECK=0 \
   run_launcher >"${tmp_dir}/stopped-offline.out" 2>&1
 assert_contains "${FAKE_COMPOSE_LOG}" "start codex"
@@ -371,7 +414,7 @@ done
 
 reset_state
 run_launcher >"${tmp_dir}/published-lag.out" 2>&1
-assert_contains "${FAKE_NOTICE_LOG}" "latest published workstation image was just pulled"
+assert_contains "${FAKE_NOTICE_LOG}" "Published workstation images were checked"
 assert_not_contains "${FAKE_NOTICE_LOG}" "Run 'myCodex pull'"
 
 reset_state
@@ -379,5 +422,97 @@ run_launcher notices >"${tmp_dir}/reopen.out" 2>&1
 assert_contains "${FAKE_COMPOSE_LOG}" "exec -it codex"
 assert_not_contains "${FAKE_COMPOSE_LOG}" " pull "
 assert_not_contains "${FAKE_DOCKER_LOG}" "curl --connect-timeout"
+
+# A newer local build wins over both registry aliases, including the next start.
+reset_state
+printf 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|0.167.0|1\n' >"${FAKE_IMAGE_STATE}"
+for attempt in 1 2; do
+  rm -f -- "${FAKE_STARTED}"
+  FAKE_PULLED_VERSION=0.166.0 MYCODEX_UPDATE_CHECK=0 run_launcher >"${tmp_dir}/no-downgrade-${attempt}.out" 2>&1
+  assert_contains "${FAKE_COMPOSE_LOG}" "image=0.167.0-r1-aaaaaaaaaaaa"
+  assert_not_contains "${FAKE_COMPOSE_LOG}" "image=0.166.0-r2-bbbbbbbbbbbb"
+done
+
+# Native publication can precede the complete multi-platform release.
+for arch in amd64 arm64; do
+  reset_state
+  FAKE_SERVER_ARCH="${arch}" FAKE_NATIVE_CODEX_VERSION=0.167.0 \
+    FAKE_PULLED_VERSION=0.166.0 MYCODEX_UPDATE_CHECK=0 \
+    run_launcher >"${tmp_dir}/native-${arch}.out" 2>&1
+  assert_contains "${FAKE_COMPOSE_LOG}" "image=latest-${arch}"
+  assert_contains "${FAKE_COMPOSE_LOG}" "image=0.167.0-r1-dddddddddddd"
+done
+
+# A registry rollback must not downgrade an existing stopped workstation.
+reset_state
+FAKE_CONTAINER_EXISTS=1 FAKE_CURRENT_CODEX_VERSION=0.170.0 \
+  FAKE_PULLED_VERSION=0.166.0 MYCODEX_UPDATE_CHECK=0 \
+  run_launcher >"${tmp_dir}/stopped-newer.out" 2>&1
+assert_contains "${FAKE_COMPOSE_LOG}" "start codex"
+assert_not_contains "${FAKE_COMPOSE_LOG}" " up "
+
+# Content-qualified runtime tags never move when a release is rebuilt.
+reset_state
+printf 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|0.167.0|1\n' >"${FAKE_IMAGE_STATE}"
+MYCODEX_AUTO_PULL=0 MYCODEX_UPDATE_CHECK=0 run_launcher >"${tmp_dir}/first-build.out" 2>&1
+rm -f -- "${FAKE_STARTED}"
+printf 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb|0.167.0|1\n' >"${FAKE_IMAGE_STATE}"
+MYCODEX_AUTO_PULL=0 MYCODEX_UPDATE_CHECK=0 run_launcher >"${tmp_dir}/rebuilt.out" 2>&1
+assert_contains "${FAKE_IMAGE_STATE}.0.167.0-r1-aaaaaaaaaaaa" "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+assert_contains "${FAKE_COMPOSE_LOG}" "image=0.167.0-r1-bbbbbbbbbbbb"
+
+# Revisions compare numerically, and a newer complete release can beat a stale
+# native alias left by an older publisher.
+reset_state
+printf 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|0.167.0|10\n' >"${FAKE_IMAGE_STATE}"
+FAKE_PULLED_VERSION=0.167.0 FAKE_PULLED_REVISION=2 MYCODEX_UPDATE_CHECK=0 \
+  run_launcher >"${tmp_dir}/revision-order.out" 2>&1
+assert_contains "${FAKE_COMPOSE_LOG}" "image=0.167.0-r10-aaaaaaaaaaaa"
+reset_state
+FAKE_NATIVE_CODEX_VERSION=0.166.0 FAKE_PULLED_VERSION=0.167.0 MYCODEX_UPDATE_CHECK=0 \
+  run_launcher >"${tmp_dir}/legacy-newer.out" 2>&1
+assert_contains "${FAKE_COMPOSE_LOG}" "image=0.167.0-r2-bbbbbbbbbbbb"
+
+reset_state
+FAKE_NATIVE_CODEX_VERSION=0.167.0 FAKE_LEGACY_PULL_FAILURE=1 MYCODEX_UPDATE_CHECK=0 \
+  run_launcher >"${tmp_dir}/native-only.out" 2>&1
+assert_contains "${FAKE_COMPOSE_LOG}" "image=0.167.0-r1-dddddddddddd"
+
+# An explicit pull must still report an offline failure, without recreating.
+reset_state
+touch "${FAKE_IMAGE_STATE}"
+if FAKE_PULL_FAILURE=1 run_launcher pull >"${tmp_dir}/explicit-offline.out" 2>&1; then
+  fail "explicit pull must report a failed refresh"
+fi
+assert_not_contains "${FAKE_COMPOSE_LOG}" " up "
+
+# Plain up/create also use stable references. Explicit pins are kept verbatim.
+for command in up create; do
+  reset_state
+  touch "${FAKE_IMAGE_STATE}"
+  run_launcher "${command}" >"${tmp_dir}/${command}-pinned.out" 2>&1
+  assert_contains "${FAKE_COMPOSE_LOG}" "image=0.147.0-r1-aaaaaaaaaaaa"
+done
+reset_state
+touch "${FAKE_IMAGE_STATE}"
+MYCODEX_IMAGE_TAG=0.167.0-r1-amd64 MYCODEX_UPDATE_CHECK=0 \
+  run_launcher >"${tmp_dir}/explicit-native.out" 2>&1
+assert_contains "${FAKE_COMPOSE_LOG}" "image=0.167.0-r1-amd64"
+assert_not_contains "${FAKE_COMPOSE_LOG}" " pull "
+
+# A conflicting runtime tag is never overwritten, even before a refresh.
+reset_state
+printf 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|0.167.0|1\n' >"${FAKE_IMAGE_STATE}"
+printf 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb|0.167.0|1\n' >"${FAKE_IMAGE_STATE}.0.167.0-r1-aaaaaaaaaaaa"
+if run_launcher >"${tmp_dir}/collision.out" 2>&1; then fail "runtime tag collision accepted"; fi
+assert_contains "${tmp_dir}/collision.out" "runtime image tag collision"
+assert_not_contains "${FAKE_COMPOSE_LOG}" " pull "
+assert_not_contains "${FAKE_DOCKER_LOG}" "image tag"
+
+# Unversioned development images still work without inventing a release number.
+reset_state
+printf 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|latest|1\n' >"${FAKE_IMAGE_STATE}"
+MYCODEX_AUTO_PULL=0 MYCODEX_UPDATE_CHECK=0 run_launcher >"${tmp_dir}/unversioned.out" 2>&1
+assert_contains "${FAKE_COMPOSE_LOG}" "image=sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 printf 'PASS: launcher image lifecycle and update notification\n'

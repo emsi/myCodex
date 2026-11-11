@@ -26,7 +26,7 @@ Options:
   --refresh-tags, --force Rebuild local tags with the normal Docker cache;
                           never overwrites revision-qualified registry tags
   --release               Build the release arch set: amd64 arm64
-  --push                  Push this build's arch tags; finalize when complete
+  --push                  Push arch tags and native update aliases; finalize when complete
   --manifest              Finalize a complete arch set and re-evaluate its
                           moving aliases under monotonic promotion rules
 
@@ -44,11 +44,13 @@ Tag model:
   ghcr.io/infrasecture/harness-workstation:<version>-r<revision>-arm64
   ghcr.io/infrasecture/harness-workstation:<version>-r<revision>  immutable manifest
   ghcr.io/infrasecture/harness-workstation:<version>              moving alias
-  ghcr.io/infrasecture/harness-workstation:latest                 moving alias
+  ghcr.io/infrasecture/harness-workstation:latest-amd64           native update alias
+  ghcr.io/infrasecture/harness-workstation:latest-arm64           native update alias
+  ghcr.io/infrasecture/harness-workstation:latest                 multi-platform alias
 
 Multi-arch:
   Each machine builds and pushes only its own revision-qualified arch tag. The
-  first builder exits successfully with a pending-architecture message. Once
+  first builder updates its native alias and reports pending architectures. Once
   every RELEASE_ARCHS tag exists, the immutable release manifest is created and
   eligible moving aliases are promoted monotonically. Builders may run in either
   order without QEMU or cross-architecture tag replacement.
@@ -595,6 +597,34 @@ publish_moving_aliases() {
   echo ""
 }
 
+# Publish a discoverable native alias immediately; the complete multi-platform
+# aliases still wait for RELEASE_ARCHS. Reuse the same monotonic release ordering.
+publish_arch_aliases() {
+  local source alias arch status
+  [[ "${PUBLISH_LATEST}" == true ]] || return 0
+  for source in "${MANIFEST_SOURCES[@]}"; do
+    arch="${source##*-}"
+    alias="${IMAGE_NAME}:latest-${arch}"
+    if remote_ref_exists "${alias}"; then
+      if remote_release_identity "${alias}"; then
+        if [[ "${REMOTE_IDENTITY_VERSION}" == "${VERSION}" \
+          && "${REMOTE_IDENTITY_REVISION}" == "${IMAGE_REVISION}" \
+          && "${REMOTE_IDENTITY_INPUT_DIGEST}" == "${BUILD_INPUT_DIGEST}" ]]; then
+          continue
+        fi
+      else
+        status=$?
+        [[ "${status}" == 1 ]] || return "${status}"
+      fi
+    fi
+    if alias_promotion_allowed "${alias}" latest; then
+      echo "==> Updating native alias ${alias} from ${source}"
+      docker buildx imagetools create --tag "${alias}" "${source}"
+      UPDATED_ALIAS_REFS+=("${alias}")
+    fi
+  done
+}
+
 finalize_release_manifest() {
   local require_complete="$1"
   local promote_existing="$2"
@@ -602,6 +632,9 @@ finalize_release_manifest() {
 
   FINALIZATION_STATE="pending"
   collect_manifest_sources
+  if [[ "${#MISSING_ARCHES[@]}" == 0 || "${require_complete}" != true ]]; then
+    publish_arch_aliases
+  fi
   if [[ "${#MISSING_ARCHES[@]}" -gt 0 ]]; then
     if [[ "${require_complete}" == "true" ]]; then
       echo "ERROR: cannot finalize $(release_ref); missing architecture tags: ${MISSING_ARCHES[*]}" >&2
@@ -609,7 +642,7 @@ finalize_release_manifest() {
       return 1
     fi
     echo "==> Release ${RELEASE_TAG} is pending architecture tags: ${MISSING_ARCHES[*]}"
-    echo "    The pushed arch tag is immutable; no manifest aliases were changed."
+    echo "    Eligible native aliases were evaluated; multi-platform aliases were not changed."
     echo ""
     return 0
   fi
@@ -723,10 +756,12 @@ for ARCH in ${ARCHS}; do
   if [[ "${ARCH}" == "${NATIVE_ARCH}" ]]; then
     docker image tag "${tag}" "${IMAGE_NAME}:${RELEASE_TAG}"
     docker image tag "${tag}" "${IMAGE_NAME}:${VERSION}"
+    docker image tag "${tag}" "${IMAGE_NAME}:latest-${ARCH}"
     docker image tag "${tag}" "${IMAGE_NAME}:latest"
     echo "    Tagged native local aliases:"
     echo "      ${IMAGE_NAME}:${RELEASE_TAG}"
     echo "      ${IMAGE_NAME}:${VERSION}"
+    echo "      ${IMAGE_NAME}:latest-${ARCH}"
     echo "      ${IMAGE_NAME}:latest"
   fi
   echo ""
@@ -768,6 +803,7 @@ if printf '%s\n' "${BUILT_ARCHS[@]}" | grep -qFx "${NATIVE_ARCH}"; then
   echo "Native local aliases:"
   echo "  ${IMAGE_NAME}:${RELEASE_TAG}"
   echo "  ${IMAGE_NAME}:${VERSION}"
+  echo "  ${IMAGE_NAME}:latest-${NATIVE_ARCH}"
   echo "  ${IMAGE_NAME}:latest"
 fi
 if [[ "${DO_PUSH}" == "true" ]]; then
@@ -786,6 +822,6 @@ if [[ "${DO_PUSH}" == "true" ]]; then
   elif [[ "${FINALIZATION_STATE}" == "existing" ]]; then
     echo "Existing immutable registry manifest:"
     echo "  ${IMAGE_NAME}:${RELEASE_TAG}"
-    echo "Moving registry aliases were not changed."
+    echo "Moving registry aliases were not changed. Native aliases were evaluated separately."
   fi
 fi

@@ -88,7 +88,16 @@ case "${1:-} ${2:-}" in
     ;;
   "volume inspect") exit 0 ;;
   "volume create") exit 0 ;;
-  "image inspect") exit 0 ;;
+  "version --format") printf 'amd64\n' ;;
+  "image inspect")
+    if [[ " $* " == *' --format '* ]]; then
+      case "$4" in
+        *'|'*) printf '%s|0.147.0|1\n' "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" ;;
+        *) printf '%s\n' "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" ;;
+      esac
+    fi
+    ;;
+  "image tag") exit 0 ;;
   "inspect --format")
     [[ "${FAKE_CONTAINER_EXISTS:-0}" == 1 || -f "${FAKE_GUI_STATE}" ]] || exit 1
     case "$3" in
@@ -103,7 +112,7 @@ case "${1:-} ${2:-}" in
           printf '%s\n' "${FAKE_CONTAINER_STATE:-running}"
         fi
         ;;
-      *'.Image'*) printf 'sha256:same\n' ;;
+      *'.Image'*) printf 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' ;;
       *) exit 1 ;;
     esac
     ;;

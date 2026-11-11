@@ -17,7 +17,8 @@ cleanup() {
   docker rm -f "$CODEX_CONTAINER_NAME" >/dev/null 2>&1 || true
   docker volume rm "$MYCODEX_STATE_VOLUME_NAME" >/dev/null 2>&1 || true
   docker network rm "${CODEX_CONTAINER_NAME}_default" >/dev/null 2>&1 || true
-  docker image rm "$MYCODEX_IMAGE_NAME:latest" "$MYCODEX_TEST_NEXT_IMAGE" >/dev/null 2>&1 || true
+  mapfile -t test_images < <(docker image ls --format '{{.Repository}}:{{.Tag}}' --filter "reference=${MYCODEX_IMAGE_NAME}:*")
+  if (( ${#test_images[@]} )); then docker image rm "${test_images[@]}" >/dev/null 2>&1 || true; fi
   rm -rf "$temp"
 }
 trap cleanup EXIT
@@ -36,17 +37,42 @@ case "$1" in
 esac
 EOF
 chmod +x "$MYCODEX_COMPOSE"
+# Use ordered release labels even when CI's base was built with CODEX_VERSION=latest.
+printf 'FROM %s\nLABEL io.infrasecture.mycodex.codex.version=1.0.0 io.infrasecture.mycodex.image.revision=1\n' "$image" \
+  | docker build -q -t "$MYCODEX_IMAGE_NAME:base" - >/dev/null
+image="$MYCODEX_IMAGE_NAME:base"
 docker tag "$image" "$MYCODEX_IMAGE_NAME:latest"
-printf 'FROM %s\nLABEL mycodex.test.revision=next\n' "$image" \
+printf 'FROM %s\nLABEL io.infrasecture.mycodex.image.revision=2\n' "$image" \
   | docker build -q -t "$MYCODEX_TEST_NEXT_IMAGE" - >/dev/null
 next_id="$(docker image inspect --format '{{.Id}}' "$MYCODEX_TEST_NEXT_IMAGE")"
 
 bash "$root/bin/myCodex" up -d --wait
+# Exercise Engine allocation, not just Compose's rendering of 0.0.0.0/28.
+network="${CODEX_CONTAINER_NAME}_default"
+network_id="$(docker network inspect --format '{{.Id}}' "$network")"
+docker network inspect --format '{{json .IPAM.Config}}' "$network" \
+  | python3 -c '
+import ipaddress, json, sys
+config = json.load(sys.stdin)
+ipv4 = [item for item in config if ipaddress.ip_network(item["Subnet"]).version == 4]
+assert len(ipv4) == 1, config
+subnet = ipaddress.ip_network(ipv4[0]["Subnet"])
+assert subnet.prefixlen == 28 and not subnet.network_address.is_unspecified, config
+assert ipaddress.ip_address(ipv4[0]["Gateway"]) in subnet, config
+'
+# Docker reports the chosen CIDR; Compose must still reuse the network on up.
+bash "$root/bin/myCodex" up -d --wait
+[[ "$(docker network inspect --format '{{.Id}}' "$network")" == "$network_id" ]]
 old_container="$(docker inspect --format '{{.Id}}' "$CODEX_CONTAINER_NAME")"
+original_ref="$(docker inspect --format '{{.Config.Image}}' "$CODEX_CONTAINER_NAME")"
+[[ "$original_ref" == "$MYCODEX_IMAGE_NAME:1.0.0-r1-"* ]]
 bash "$root/bin/myCodex" stop
 bash "$root/bin/myCodex"
 [[ "$(docker inspect --format '{{.Image}}' "$CODEX_CONTAINER_NAME")" == "$next_id" ]]
 [[ "$(docker inspect --format '{{.Id}}' "$CODEX_CONTAINER_NAME")" != "$old_container" ]]
+[[ "$(docker inspect --format '{{.Config.Image}}' "$CODEX_CONTAINER_NAME")" == "$MYCODEX_IMAGE_NAME:1.0.0-r2-"* ]]
+# Pulling the next image must not move the old versioned runtime reference.
+[[ "$(docker image inspect --format '{{.Id}}' "$original_ref")" == "$(docker image inspect --format '{{.Id}}' "$image")" ]]
 
 # A subsequent bare attach must leave a live session and container intact.
 current_container="$(docker inspect --format '{{.Id}}' "$CODEX_CONTAINER_NAME")"
@@ -56,6 +82,7 @@ bash "$root/bin/myCodex"
 # Omitted extra mounts must prevent automatic recreation of a stopped image.
 docker rm -f "$CODEX_CONTAINER_NAME" >/dev/null
 docker tag "$image" "$MYCODEX_IMAGE_NAME:latest"
+docker image rm "$MYCODEX_IMAGE_NAME:latest-$(docker version --format '{{.Server.Arch}}')" >/dev/null
 bash "$root/bin/myCodex" -v "$temp/extra:/extra" up -d --wait
 old_container="$(docker inspect --format '{{.Id}}' "$CODEX_CONTAINER_NAME")"
 bash "$root/bin/myCodex" stop

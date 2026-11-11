@@ -106,7 +106,8 @@ AUTO_ATTACH="${CODEX_AUTO_ATTACH:-0}"
 WAIT_TIMEOUT_SECONDS="${MYCODEX_WAIT_TIMEOUT_SECONDS:-30}"
 STARTUP_PROGRESS_INTERVAL_SECONDS="${MYCODEX_STARTUP_PROGRESS_INTERVAL_SECONDS:-2}"
 IMAGE_NAME="${MYCODEX_IMAGE_NAME:-${MYCODEX_DEFAULT_IMAGE_NAME}}"
-IMAGE_TAG="${MYCODEX_IMAGE_TAG:-latest}"
+REQUESTED_IMAGE_TAG="${MYCODEX_IMAGE_TAG:-latest}"
+IMAGE_TAG="${REQUESTED_IMAGE_TAG}"
 UPDATE_CHECK="${MYCODEX_UPDATE_CHECK:-1}"
 AUTO_PULL="${MYCODEX_AUTO_PULL:-1}"
 IMAGE_REFRESHED=0
@@ -1017,27 +1018,112 @@ ensure_selected_image() {
   fi
 }
 
-prepare_start_image() {
-  if [[ "${IMAGE_TAG}" != latest || "${AUTO_PULL}" != 1 ]]; then
-    ensure_selected_image
-    return
-  fi
+# Capture image IDs before refreshing mutable aliases. Runtime names include the
+# content ID so rebuilding the same release locally cannot move a running name.
+image_identity() {
+  docker image inspect --format '{{.Id}}|{{index .Config.Labels "io.infrasecture.mycodex.codex.version"}}|{{index .Config.Labels "io.infrasecture.mycodex.image.revision"}}' "$1"
+}
 
-  echo "myCodex: checking published image ${IMAGE_NAME}:${IMAGE_TAG}" >&2
-  if compose_without_state_volume_creation pull "${SERVICE}"; then
-    selected_image_exists || die "pull completed but selected image is unavailable: ${IMAGE_NAME}:${IMAGE_TAG}"
+pin_runtime_image() {
+  local identity id version revision tag existing
+  identity="$(image_identity "$1")" || die "cannot inspect image $1"
+  IFS='|' read -r id version revision <<<"${identity}"
+  [[ "${id}" =~ ^sha256:[a-f0-9]{64}$ ]] || die "invalid image ID: ${id}"
+  tag="sha256-${id#sha256:}"
+  if mycodex_validate_codex_version "${version}" >/dev/null 2>&1 \
+    && mycodex_validate_image_revision "${revision}" >/dev/null 2>&1; then
+    tag="${version}-r${revision}-${id:7:12}"
+    [[ "${tag}" =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$ ]] \
+      || tag="sha256-${id#sha256:}"
+  fi
+  if existing="$(docker image inspect --format '{{.Id}}' "${IMAGE_NAME}:${tag}" 2>/dev/null)"; then
+    [[ "${existing}" == "${id}" ]] || die "runtime image tag collision: ${IMAGE_NAME}:${tag}"
+  else
+    docker image tag "${id}" "${IMAGE_NAME}:${tag}" || die "cannot preserve image ${id}"
+  fi
+  IMAGE_TAG="${tag}"
+}
+
+# BEST_* are scoped to refresh_default_image, including calls from this helper.
+consider_default_image() {
+  local identity id version revision comparison=0
+  identity="$(image_identity "$1" 2>/dev/null)" || return 0
+  IFS='|' read -r id version revision <<<"${identity}"
+  [[ "${id}" =~ ^sha256:[a-f0-9]{64}$ ]] || die "invalid image ID: ${id}"
+  if ! mycodex_validate_codex_version "${version}" >/dev/null 2>&1 \
+    || ! mycodex_validate_image_revision "${revision}" >/dev/null 2>&1; then
+    version=""; revision=""
+  fi
+  if [[ -n "${version}" && -n "${BEST_VERSION}" ]]; then
+    comparison="$(mycodex_compare_image_releases "${version}" "${revision}" "${BEST_VERSION}" "${BEST_REVISION}")"
+  fi
+  if [[ -z "${BEST_ID}" || "${comparison}" == 1 \
+    || ( -n "${version}" && -z "${BEST_VERSION}" ) ]]; then
+    BEST_ID="${id}" BEST_VERSION="${version}" BEST_REVISION="${revision}"
+    pin_runtime_image "${id}"
+    BEST_TAG="${IMAGE_TAG}"
+  fi
+}
+
+refresh_default_image() {
+  local arch alias pulled=0 cached_id pull_output pull_errors=""
+  local BEST_ID="" BEST_VERSION="" BEST_REVISION="" BEST_TAG=""
+  arch="$(docker version --format '{{.Server.Arch}}')" || die "cannot determine Docker server architecture"
+  [[ "${arch}" =~ ^[a-z0-9_]+$ ]] || die "invalid Docker server architecture: ${arch}"
+  consider_default_image "${IMAGE_NAME}:latest"
+  consider_default_image "${IMAGE_NAME}:latest-${arch}"
+  # An existing container also protects against a stale or missing local alias.
+  if [[ "${1:-}" == existing ]]; then
+    cached_id="$(docker inspect --format '{{.Image}}' "${CONTAINER_NAME}")" || die "cannot inspect existing image"
+    consider_default_image "${cached_id}"
+  fi
+  cached_id="${BEST_ID}"
+  echo "myCodex: checking published images for ${arch}" >&2
+  for alias in "latest-${arch}" latest; do
+    if pull_output="$(IMAGE_TAG="${alias}" compose_without_state_volume_creation pull "${SERVICE}" 2>&1)"; then
+      [[ -z "${pull_output}" ]] || printf '%s\n' "${pull_output}" >&2
+      pulled=1
+      consider_default_image "${IMAGE_NAME}:${alias}"
+    else
+      pull_errors+="${pull_output}"$'\n'
+    fi
+  done
+  if [[ "${pulled}" == 0 && -n "${pull_errors//[$'\n']/}" ]]; then
+    printf '%s' "${pull_errors}" >&2
+  fi
+  if [[ -n "${BEST_ID}" ]]; then
+    # Keep the best local release discoverable on the next invocation as well.
+    docker image tag "${BEST_ID}" "${IMAGE_NAME}:latest" || die "cannot retain selected local image"
+    IMAGE_TAG="${BEST_TAG}"
+  fi
+  if [[ "${pulled}" == 1 ]]; then
+    [[ -n "${BEST_ID}" ]] || die "pull completed but no usable image is available"
     IMAGE_REFRESHED=1
+    if [[ -n "${cached_id}" && "${cached_id}" == "${BEST_ID}" ]]; then
+      startup_notice "keeping the cached image; no newer published release was selected."
+    fi
   elif [[ "${1:-}" == existing ]]; then
     startup_notice "image refresh failed; starting the existing container with its original image and mounts. Retry with 'myCodex pull' when the registry is reachable."
-  elif selected_image_exists; then
+  elif [[ -n "${BEST_ID}" ]]; then
     startup_notice "image refresh failed; using the cached ${IMAGE_NAME}:${IMAGE_TAG}. Retry with 'myCodex pull' when the registry is reachable."
   else
-    die "image refresh failed and no local image is available: ${IMAGE_NAME}:${IMAGE_TAG}"
+    die "image refresh failed and no local image is available: ${IMAGE_NAME}:latest"
+  fi
+}
+
+prepare_start_image() {
+  if [[ "${REQUESTED_IMAGE_TAG}" == latest && "${AUTO_PULL}" == 1 ]]; then
+    refresh_default_image "${1:-}"
+  else
+    ensure_selected_image
+    if [[ "${REQUESTED_IMAGE_TAG}" == latest ]]; then
+      pin_runtime_image "${IMAGE_NAME}:${IMAGE_TAG}"
+    fi
   fi
 }
 
 stopped_configuration_matches() {
-  local current_gui current_hash desired_hash
+  local current_gui current_hash desired_hash original_ref original_tag
 
   # Reproduce the established GUI mode, never migrate it during an image update.
   current_gui="$(container_gui_mode)"
@@ -1061,7 +1147,12 @@ stopped_configuration_matches() {
   # closed: start the original container instead of guessing its configuration.
   current_hash="$(docker inspect --format '{{index .Config.Labels "com.docker.compose.config-hash"}}' "${CONTAINER_NAME}")" || return 1
   [[ "${current_hash}" =~ ^[a-f0-9]{64}$ ]] || return 1
-  desired_hash="$(compose_without_state_volume_creation config --hash "${SERVICE}")" || return 1
+  # Compare all options using the image reference recorded at creation. The
+  # new release name necessarily differs and must not mask mount/env changes.
+  original_ref="$(docker inspect --format '{{.Config.Image}}' "${CONTAINER_NAME}")" || return 1
+  [[ "${original_ref}" == "${IMAGE_NAME}:"* ]] || return 1
+  original_tag="${original_ref#"${IMAGE_NAME}:"}"
+  desired_hash="$(IMAGE_TAG="${original_tag}" compose_without_state_volume_creation config --hash "${SERVICE}")" || return 1
   [[ "${desired_hash}" == "${SERVICE} ${current_hash}" ]]
 }
 
@@ -1080,7 +1171,7 @@ start_stopped_container() {
   esac
   # An explicit version tag stays pinned. `start` also always preserves the
   # original container; automatic refresh belongs only to the default command.
-  if [[ "${IMAGE_TAG}" == latest && "${AUTO_PULL}" == 1 ]]; then
+  if [[ "${REQUESTED_IMAGE_TAG}" == latest && "${AUTO_PULL}" == 1 ]]; then
     prepare_start_image existing
     # If discovery failed, the existing container is the strongest available
     # record of this project's image. A cached alias may even be older than it.
@@ -1111,10 +1202,10 @@ start_stopped_container() {
 }
 
 notify_image_refresh_hint() {
-  if [[ "${IMAGE_TAG}" != latest ]]; then
-    echo "myCodex: MYCODEX_IMAGE_TAG=${IMAGE_TAG} pins this image; select a newer tag to update it." >&2
+  if [[ "${REQUESTED_IMAGE_TAG}" != latest ]]; then
+    echo "myCodex: MYCODEX_IMAGE_TAG=${REQUESTED_IMAGE_TAG} pins this image; select a newer tag to update it." >&2
   elif [[ "${IMAGE_REFRESHED}" == 1 ]]; then
-    echo "myCodex: The latest published workstation image was just pulled. A newer npm release does not mean its workstation image has been published yet." >&2
+    echo "myCodex: Published workstation images were checked; the newest identifiable local release was retained. A newer npm release does not mean its workstation image has been published yet." >&2
   else
     echo "myCodex: Run 'myCodex pull' to refresh the published image; pulling does not recreate this container." >&2
   fi
@@ -1342,6 +1433,7 @@ run_up() {
 
   if ! has_arg --build "$@" && ! has_pull_arg "$@"; then
     ensure_selected_image
+    if [[ "${REQUESTED_IMAGE_TAG}" == latest ]]; then pin_runtime_image "${IMAGE_NAME}:${IMAGE_TAG}"; fi
   fi
 
   if has_arg --wait "$@"; then
@@ -1379,6 +1471,7 @@ run_create() {
 
   if ! has_arg --build "${args[@]}" && ! has_pull_arg "${args[@]}"; then
     ensure_selected_image
+    if [[ "${REQUESTED_IMAGE_TAG}" == latest ]]; then pin_runtime_image "${IMAGE_NAME}:${IMAGE_TAG}"; fi
   fi
   if ! has_arg --build "${args[@]}" && ! has_arg --no-build "${args[@]}"; then
     args=(--no-build "${args[@]}")
@@ -1391,7 +1484,12 @@ run_create() {
 
 run_pull() {
   if [[ $# -eq 0 ]]; then
-    compose_without_state_volume_creation pull "${SERVICE}"
+    if [[ "${REQUESTED_IMAGE_TAG}" == latest ]]; then
+      refresh_default_image
+      [[ "${IMAGE_REFRESHED}" == 1 ]] || return 1
+    else
+      compose_without_state_volume_creation pull "${SERVICE}"
+    fi
   else
     compose_without_state_volume_creation pull "$@"
   fi
@@ -1446,6 +1544,9 @@ run_default() {
       fi
       prepare_gpu
       prepare_gui
+      if [[ "${REQUESTED_IMAGE_TAG}" == latest ]]; then
+        pin_runtime_image "$(docker inspect --format '{{.Image}}' "${CONTAINER_NAME}")"
+      fi
       start_stack
     fi
   fi
